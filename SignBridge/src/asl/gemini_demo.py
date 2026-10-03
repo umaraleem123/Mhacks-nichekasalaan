@@ -32,6 +32,7 @@ from src.asl.gemini_recognizer import (
     DEFAULT_MODEL,
     GeminiConfig,
     GeminiRecognizerError,
+    GeminiRequestError,
     GeminiSignRecognizer,
     SignInterpretation,
     api_key_from_env,
@@ -151,13 +152,23 @@ class DemoSession:
         try:
             self.result = pending.result()
             self.status = Status.RESULT
+        except GeminiRequestError as exc:
+            # Full detail to the terminal for debugging, one line on screen.
+            # Both have already been through redact_secrets.
+            self.status = Status.ERROR
+            self.error = exc.short_message
+            print(exc.diagnostics(), file=sys.stderr)
         except GeminiRecognizerError as exc:
-            # Message is already sanitized by the recognizer.
             self.status = Status.ERROR
             self.error = str(exc)
+            print(f"Gemini request failed\nError: {exc}", file=sys.stderr)
         except Exception as exc:
             self.status = Status.ERROR
             self.error = f"Unexpected failure ({type(exc).__name__})."
+            print(
+                f"Unexpected failure\nError type: {type(exc).__name__}",
+                file=sys.stderr,
+            )
 
     def close(self) -> None:
         if self._owns_executor:
