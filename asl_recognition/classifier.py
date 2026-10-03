@@ -73,8 +73,6 @@ def classify_asl(hand: HandLandmarks) -> ASLPrediction:
     tip_thumb_index = hand.distance2d(THUMB_TIP, INDEX_TIP)
     tip_thumb_middle = hand.distance2d(THUMB_TIP, MIDDLE_TIP)
     tip_index_middle = hand.distance2d(INDEX_TIP, MIDDLE_TIP)
-    tip_middle_ring = hand.distance2d(MIDDLE_TIP, RING_TIP)
-    tip_ring_pinky = hand.distance2d(RING_TIP, PINKY_TIP)
 
     # Palm scale: wrist → middle MCP
     scale = max(hand.distance2d(WRIST, MIDDLE_MCP), 1e-6)
