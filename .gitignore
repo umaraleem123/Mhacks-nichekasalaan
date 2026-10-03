@@ -1,0 +1,14 @@
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.DS_Store
+*_asl.jpg
+*_asl.png
+*.mp4
+.coverage
+htmlcov/
+models/*.task
+!models/.gitkeep
+demo_assets/
