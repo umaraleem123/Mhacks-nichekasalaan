@@ -14,3 +14,10 @@ mediapipe==0.10.21
 # so we pin that package rather than opencv-python to avoid installing two
 # competing copies of cv2.
 opencv-contrib-python>=4.8,<5
+
+# Milestone 2: ASL sign classifier (random forest over landmark features).
+# joblib ships with scikit-learn and is its documented way to persist models;
+# it is listed because train.py and recognizer.py import it directly.
+scikit-learn>=1.3,<2
+joblib>=1.3
+

@@ -1,9 +1,11 @@
 # SignBridge
 
-> **Status: Milestone 1 — hand tracking.** Live webcam hand detection works.
-> Sign recognition, speech, and the UI are not built yet. See
-> [Development Setup](#development-setup) and
-> [Milestone 1 — Hand Tracking](#milestone-1--hand-tracking).
+> **Status: Milestone 2 — ASL recognition.** Hand tracking works, and the sign
+> classifier (collect, train, recognize) is in place for hello / yes / no.
+> Speech and the UI are not built yet. See
+> [Development Setup](#development-setup),
+> [Milestone 1 — Hand Tracking](#milestone-1--hand-tracking), and
+> [Milestone 2 — ASL Recognition](#milestone-2--asl-recognition).
 
 SignBridge is a bidirectional communication system that bridges American Sign
 Language and spoken English, built as a 24-hour hackathon MVP. It is a
@@ -381,3 +383,129 @@ installed MediaPipe is newer than 0.10.21. See "Reinstalling" above.
 **`Check failed: service_ Service is unavailable` / `DrishtiMetalHelper` /
 `zsh: abort`.** Same cause: a newer MediaPipe using the Tasks API, which
 crashes in Metal on Apple Silicon. Reinstall the pinned version.
+
+## Milestone 2 — ASL Recognition
+
+Recognizes a small set of static ASL signs from the webcam. The pipeline is:
+
+```
+webcam -> HandTracker -> 21 landmarks -> features -> classifier -> sign + confidence
+```
+
+Starting vocabulary: **hello**, **yes**, **no**.
+
+The three steps are collect, train, run. Commands are identical on macOS and
+Windows, and all of them run from the `SignBridge/` directory with the virtual
+environment active.
+
+### Feature representation
+
+Each hand becomes 63 numbers: the 21 landmarks as (x, y, z), normalized so the
+classifier does not care where the hand is, how big it is, or which hand it is.
+Raw pixel coordinates are never used. `src/asl/features.py` documents the three
+steps (mirror left hands, move the wrist to the origin, divide by the distance
+to the furthest landmark). Hand rotation is intentionally preserved, because
+orientation is part of what distinguishes one sign from another.
+
+### 1. Collect data
+
+```
+python -m src.asl.data_collector
+```
+
+Keyboard controls, also shown on screen:
+
+| Key | Action |
+| --- | --- |
+| `1` | select **hello** |
+| `2` | select **yes** |
+| `3` | select **no** |
+| `R` | start / stop recording |
+| `Q` | quit |
+
+Number keys follow the order of `SIGNS` in `src/asl/__init__.py`, so a fourth
+sign becomes `4` automatically.
+
+Pick a sign, press `R`, hold the sign while moving your hand around the frame
+and varying distance and angle slightly, then press `R` again. Samples are only
+recorded while **exactly one** hand is visible, since two hands in frame have
+no stable order and would mix into the same class. The window shows the current
+sign, counts per sign, how many hands are visible, and whether recording is on.
+
+Useful options:
+
+```
+python -m src.asl.data_collector --target 300      # per-sign goal (default 200)
+python -m src.asl.data_collector --interval 0.05   # seconds between samples
+```
+
+Recording pauses automatically at `--target`. Running the collector again
+appends to the existing data rather than replacing it.
+
+**Aim for roughly 200 samples per sign** for the first test, collected in two
+or three short bursts with your hand repositioned between them. Variety matters
+much more than volume: 200 samples of a hand frozen in one spot will score
+highly at training time and still fail live.
+
+### 2. Train
+
+```
+python -m src.asl.train
+```
+
+Loads every sample, splits 80/20 with a fixed seed, trains a random forest, and
+prints accuracy, a per-class report, and a confusion matrix. Requires at least
+two signs with at least 20 samples each, and says exactly what is missing
+otherwise.
+
+Options: `--test-size`, `--trees`, `--seed`, `--data-dir`, `--model-out`.
+
+Treat a reported accuracy near 100% with suspicion if all your samples came
+from one continuous recording; consecutive frames are nearly identical, so some
+of them land in both the training and test halves.
+
+### 3. Run live recognition
+
+```
+python -m src.asl.live_recognition
+```
+
+Shows the camera with landmarks drawn, plus the predicted sign, confidence, and
+FPS. Press `Q` to quit. Predictions below the confidence threshold display as
+`SIGN: UNKNOWN` instead of guessing.
+
+```
+python -m src.asl.live_recognition --threshold 0.8   # stricter (default 0.6)
+```
+
+### Where things are stored
+
+Training data is written to `data/asl/<sign>/samples.csv`, one row per sample:
+63 feature values and a label. No images are saved. The trained model goes to
+`models/asl_classifier.pkl`, which also stores the class list and feature
+length so the recognizer can detect a stale model.
+
+Both `data/` and `models/` are gitignored, so samples and models stay local and
+each person collects their own.
+
+### Adding more signs later
+
+Append the name to `SIGNS` in `src/asl/__init__.py`:
+
+```python
+SIGNS: list[str] = ["hello", "yes", "no", "thanks"]
+```
+
+That is the only code change. The collector gives it the next number key, the
+trainer picks up the new folder on its own, and the recognizer reads its
+classes from the model. Then collect samples for the new sign and retrain:
+
+```
+python -m src.asl.data_collector
+python -m src.asl.train
+```
+
+Retraining rebuilds the model from everything in `data/asl/`, so existing signs
+are kept. Expect accuracy to dip as the vocabulary grows and signs start to
+resemble each other; signs that differ only by motion will need a different
+approach, since this classifier sees one frame at a time.

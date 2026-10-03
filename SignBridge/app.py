@@ -1,7 +1,8 @@
 """SignBridge — Milestone 1: live webcam hand tracking.
 
 Opens the default camera, overlays MediaPipe hand landmarks, and shows the
-result in a window. No sign recognition yet.
+result in a window. No sign recognition here; that lives in
+`src.asl.live_recognition`.
 """
 
 from __future__ import annotations
@@ -11,41 +12,12 @@ import sys
 import cv2
 import numpy as np
 
+from src.vision.camera import CAMERA_LOST_ERROR, open_camera
 from src.vision.hand_tracker import DetectedHand, HandTracker, HandTrackerError
+from src.vision.overlay import draw_text_lines
 
 WINDOW_NAME = "SignBridge"
-REQUESTED_WIDTH = 1280
-REQUESTED_HEIGHT = 720
 MAX_CONSECUTIVE_READ_FAILURES = 30
-
-CAMERA_OPEN_ERROR = """Error: could not open the default webcam.
-
-Things to check:
-  1. Camera permission. macOS: System Settings > Privacy & Security > Camera,
-     and enable the terminal app you launched this from. Windows: Settings >
-     Privacy & security > Camera, and allow desktop apps to access the camera.
-  2. Another application may be holding the camera. Quit video calls, browser
-     tabs, and recording tools, then try again.
-  3. On a desktop machine, confirm an external webcam is plugged in."""
-
-CAMERA_LOST_ERROR = """Error: lost the connection to the webcam.
-
-The camera stopped returning frames. It may have been unplugged or claimed by
-another application. Reconnect it and run the app again."""
-
-
-def open_camera() -> cv2.VideoCapture | None:
-    """Open the default camera, or return None with an explanation printed."""
-    camera = cv2.VideoCapture(0)
-    if not camera.isOpened():
-        camera.release()
-        print(CAMERA_OPEN_ERROR, file=sys.stderr)
-        return None
-
-    # Requests only; the driver picks the nearest supported mode.
-    camera.set(cv2.CAP_PROP_FRAME_WIDTH, REQUESTED_WIDTH)
-    camera.set(cv2.CAP_PROP_FRAME_HEIGHT, REQUESTED_HEIGHT)
-    return camera
 
 
 def draw_overlay(frame: np.ndarray, hands: list[DetectedHand]) -> None:
@@ -53,12 +25,7 @@ def draw_overlay(frame: np.ndarray, hands: list[DetectedHand]) -> None:
     lines = [WINDOW_NAME, f"Hands detected: {len(hands)}"]
     lines += [f"{hand.label} hand ({hand.confidence:.0%})" for hand in hands]
     lines.append("Press 'q' to quit")
-
-    for index, line in enumerate(lines):
-        position = (12, 32 + index * 30)
-        # Dark pass underneath keeps the text readable on a bright background.
-        cv2.putText(frame, line, position, cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 0), 4, cv2.LINE_AA)
-        cv2.putText(frame, line, position, cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2, cv2.LINE_AA)
+    draw_text_lines(frame, lines)
 
 
 def run_loop(camera: cv2.VideoCapture, tracker: HandTracker) -> int:
