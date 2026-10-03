@@ -1,0 +1,119 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>SignBridge — Live ASL Recognition</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}">
+</head>
+<body>
+  <div class="glow glow-a"></div>
+  <div class="glow glow-b"></div>
+
+  <header class="topbar">
+    <div class="brand">
+      <div class="logo" aria-hidden="true">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M18 11V6a2 2 0 0 0-4 0v5"/><path d="M14 10V4a2 2 0 0 0-4 0v6"/>
+          <path d="M10 10.5V6a2 2 0 0 0-4 0v8"/>
+          <path d="M18 8a2 2 0 1 1 4 0v6a8 8 0 0 1-8 8h-2c-2.8 0-4.5-.86-5.99-2.34l-3.6-3.6a2 2 0 0 1 2.83-2.82L7 15"/>
+        </svg>
+      </div>
+      <div>
+        <h1>SignBridge</h1>
+        <p>Live ASL recognition in your browser</p>
+      </div>
+    </div>
+    <div id="model-pill" class="pill pill-muted"><span class="dot"></span><span id="model-pill-text">Connecting…</span></div>
+  </header>
+
+  <main class="layout">
+    <section class="stage card">
+      <div class="video-wrap" id="video-wrap">
+        <video id="video" playsinline muted></video>
+        <canvas id="overlay"></canvas>
+
+        <div class="placeholder" id="placeholder">
+          <div class="placeholder-icon">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+              <path d="m22 8-6 4 6 4V8Z"/><rect x="2" y="6" width="14" height="12" rx="2"/>
+            </svg>
+          </div>
+          <h2>Start your camera</h2>
+          <p>Frames are sent only to the SignBridge server running on this machine.</p>
+          <button class="btn btn-primary" id="start-btn">Start camera</button>
+          <p class="error-text" id="camera-error"></p>
+        </div>
+
+        <div class="hud" id="hud" hidden>
+          <span class="hud-chip"><span class="live-dot"></span>LIVE</span>
+          <span class="hud-chip" id="hud-fps">0 FPS</span>
+          <span class="hud-chip" id="hud-hand">No hand</span>
+        </div>
+
+        <div class="sign-banner" id="sign-banner" hidden>
+          <span class="sign-banner-label">Sign</span>
+          <span class="sign-banner-value" id="banner-sign">—</span>
+        </div>
+      </div>
+
+      <div class="stage-controls">
+        <label class="field">
+          <span>Camera</span>
+          <select id="camera-select" disabled><option>Default camera</option></select>
+        </label>
+        <button class="btn btn-ghost" id="stop-btn" disabled>Stop</button>
+      </div>
+    </section>
+
+    <aside class="sidebar">
+      <section class="card prediction">
+        <div class="card-head">
+          <h3>Prediction</h3>
+          <span class="muted" id="latency">— ms</span>
+        </div>
+        <div class="big-sign" id="big-sign">Waiting</div>
+        <div class="meter"><div class="meter-fill" id="meter-fill"></div><div class="meter-mark" id="meter-mark"></div></div>
+        <div class="meter-labels"><span>Confidence</span><span id="confidence-text">0%</span></div>
+      </section>
+
+      <section class="card notice" id="no-model" hidden>
+        <h3>No trained model yet</h3>
+        <p>Hand tracking works, but there is nothing to recognize against. From the <code>SignBridge</code> folder, run:</p>
+        <pre>python -m src.asl.data_collector
+python -m src.asl.train</pre>
+        <button class="btn btn-ghost btn-small" id="reload-btn">Reload model</button>
+      </section>
+
+      <section class="card">
+        <div class="card-head"><h3>Vocabulary</h3><span class="muted" id="class-count"></span></div>
+        <div class="chips" id="chips"></div>
+      </section>
+
+      <section class="card">
+        <div class="card-head">
+          <h3>Transcript</h3>
+          <div class="row">
+            <label class="toggle" title="Read new signs aloud">
+              <input type="checkbox" id="speak-toggle"><span class="toggle-track"></span><span>Speak</span>
+            </label>
+            <button class="btn btn-ghost btn-small" id="clear-btn">Clear</button>
+          </div>
+        </div>
+        <div class="transcript" id="transcript"><span class="muted">Recognized signs will appear here.</span></div>
+      </section>
+
+      <section class="card">
+        <div class="card-head"><h3>Sensitivity</h3><span class="muted" id="threshold-text"></span></div>
+        <input type="range" id="threshold" min="0.3" max="0.95" step="0.05">
+        <p class="hint">Predictions below this confidence show as unknown instead of guessing.</p>
+      </section>
+    </aside>
+  </main>
+
+  <script src="{{ url_for('static', filename='app.js') }}"></script>
+</body>
+</html>

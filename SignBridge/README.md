@@ -484,6 +484,24 @@ FPS. Press `Q` to quit. Predictions below the confidence threshold display as
 python -m src.asl.live_recognition --threshold 0.8   # stricter (default 0.6)
 ```
 
+### Or run it in the browser
+
+```
+python -m src.web.server
+```
+
+Then open [http://127.0.0.1:5000](http://127.0.0.1:5000) and click
+**Start camera**. The page shows the live feed with landmarks, the predicted
+sign and confidence, a transcript of recognized signs (optionally read aloud),
+and a sensitivity slider. The browser captures the webcam and posts frames to
+the local server, which runs the same tracker and model as the desktop app.
+
+Without a trained model the page still tracks hands and shows how to train
+one; after training, click **Reload model** instead of restarting the server.
+
+Options: `--host`, `--port`, `--model`. Browsers only allow webcam access on
+`localhost`/`127.0.0.1` or over HTTPS, so open the page from the same machine.
+
 ### Where things are stored
 
 Training data is written to `data/asl/<sign>/samples.csv`, one row per sample:

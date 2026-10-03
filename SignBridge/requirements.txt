@@ -21,3 +21,7 @@ opencv-contrib-python>=4.8,<5
 scikit-learn>=1.3,<2
 joblib>=1.3
 
+# Milestone 3: web front end. The browser owns the webcam and posts frames to a
+# small Flask server that reuses the tracker and recognizer above.
+flask>=3,<4
+
