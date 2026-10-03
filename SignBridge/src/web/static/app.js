@@ -213,12 +213,12 @@ function drawHands(hands) {
     const pts = hand.points.map(([x, y]) => [x * width, y * height]);
 
     const gradient = overlayCtx.createLinearGradient(0, 0, width, height);
-    gradient.addColorStop(0, "#7c8cff");
-    gradient.addColorStop(1, "#3dd6c6");
+    gradient.addColorStop(0, "#e8d35a");
+    gradient.addColorStop(1, "#bdc59a");
     overlayCtx.strokeStyle = gradient;
     overlayCtx.lineWidth = lineWidth;
     overlayCtx.lineCap = "round";
-    overlayCtx.shadowColor = "rgba(124, 140, 255, 0.8)";
+    overlayCtx.shadowColor = "rgba(232, 211, 90, 0.75)";
     overlayCtx.shadowBlur = 12;
     overlayCtx.beginPath();
     for (const [a, b] of HAND_CONNECTIONS) {
@@ -232,7 +232,7 @@ function drawHands(hands) {
       const radius = lineWidth * (FINGERTIPS.has(index) ? 2.2 : 1.5);
       overlayCtx.beginPath();
       overlayCtx.arc(x, y, radius, 0, Math.PI * 2);
-      overlayCtx.fillStyle = FINGERTIPS.has(index) ? "#3dd6c6" : "#ffffff";
+      overlayCtx.fillStyle = FINGERTIPS.has(index) ? "#e8d35a" : "#efe9d4";
       overlayCtx.fill();
     });
   }
@@ -305,13 +305,17 @@ function clearTranscript() {
   state.lastCommitted = null;
   const empty = document.createElement("span");
   empty.className = "muted";
-  empty.textContent = "Recognized signs will appear here.";
+  empty.textContent = "Recognized signs will sprout here.";
   el.transcript.replaceChildren(empty);
 }
 
 // ---------- Wiring ----------
 
 el.startBtn.addEventListener("click", () => startCamera());
+$("hero-start").addEventListener("click", () => {
+  $("app").scrollIntoView({ behavior: "smooth" });
+  if (!state.running) startCamera();
+});
 el.stopBtn.addEventListener("click", stopCamera);
 el.cameraSelect.addEventListener("change", () => startCamera(el.cameraSelect.value));
 el.reloadBtn.addEventListener("click", () => loadStatus("/api/reload", "POST"));
