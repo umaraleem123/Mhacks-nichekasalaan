@@ -1,4 +1,5 @@
-"""Camera capture and ASL sign recognition.
+"""Camera capture and hand tracking.
 
-Hand tracking lives in `hand_tracker`. Sign recognition is not implemented yet.
+Camera selection lives in `camera`, hand tracking in `hand_tracker`, and the
+shared on-frame text drawing in `overlay`. Sign recognition lives in `src.asl`.
 """

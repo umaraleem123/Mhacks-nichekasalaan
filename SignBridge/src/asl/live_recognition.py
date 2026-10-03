@@ -43,7 +43,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="below this confidence the prediction is reported as unknown",
     )
     parser.add_argument("--model", type=Path, default=None, help="trained model path")
-    parser.add_argument("--camera", type=int, default=0, help="camera index")
+    parser.add_argument(
+        "--camera", type=int, default=None,
+        help="camera index; default prefers a Logitech Brio, then the default camera",
+    )
     return parser.parse_args(argv)
 
 
@@ -105,9 +108,10 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     print(f"Loaded model with signs: {', '.join(recognizer.classes)}")
 
-    camera = open_camera(args.camera)
-    if camera is None:
+    opened = open_camera(args.camera)
+    if opened is None:
         return 1
+    camera, _camera_name = opened
 
     try:
         with HandTracker() as tracker:

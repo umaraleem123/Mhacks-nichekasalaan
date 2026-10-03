@@ -86,7 +86,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--data-dir", type=Path, default=ASL_DATA_DIR,
         help="where sample CSVs are written",
     )
-    parser.add_argument("--camera", type=int, default=0, help="camera index")
+    parser.add_argument(
+        "--camera", type=int, default=None,
+        help="camera index; default prefers a Logitech Brio, then the default camera",
+    )
     return parser.parse_args(argv)
 
 
@@ -188,9 +191,10 @@ def main(argv: list[str] | None = None) -> int:
         f"{i}={name}" for i, name in enumerate(SIGNS, start=1)
     ) + "  R=record  Q=quit")
 
-    camera = open_camera(args.camera)
-    if camera is None:
+    opened = open_camera(args.camera)
+    if opened is None:
         return 1
+    camera, _camera_name = opened
 
     try:
         with HandTracker() as tracker:

@@ -298,10 +298,16 @@ The verify step only imports the two libraries. It does not open the webcam.
 
 ### What this does
 
-Opens the default webcam, detects up to two hands per frame with MediaPipe,
-and draws the 21 landmarks and their connections over the live video. It also
-labels each hand Left or Right. This milestone visualizes hands only; it does
-**not** recognize any sign.
+Opens the webcam, detects up to two hands per frame with MediaPipe, and draws
+the 21 landmarks and their connections over the live video. It also labels each
+hand Left or Right. This milestone visualizes hands only; it does **not**
+recognize any sign.
+
+Camera selection is automatic: a Logitech Brio is used when one is connected,
+otherwise the default camera. The chosen device is printed at startup and shown
+in the window. On Windows capture goes through DirectShow, which avoids a long
+stall before the Brio starts delivering frames. To pick a device yourself, pass
+`--camera <index>` to the collector or the live recognizer.
 
 Two files make it work:
 
@@ -356,7 +362,7 @@ MediaPipe loads its model.
 
 ### Webcam troubleshooting
 
-**"could not open the default webcam"**
+**"could not open a webcam"**
 
 Grant camera permission. On macOS the permission belongs to the *terminal app*
 you launched from, not to Python: System Settings → Privacy & Security →
