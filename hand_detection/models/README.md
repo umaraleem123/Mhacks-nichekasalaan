@@ -1,0 +1,5 @@
+The MediaPipe `hand_landmarker.task` model is downloaded here automatically on first run of `webcam_hands.py`.
+
+You can also download it manually:
+
+https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task
