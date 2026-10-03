@@ -1,8 +1,13 @@
 """Recognize an ASL sign from a short frame sequence using Gemini.
 
-All Gemini access is confined to this module so the rest of SignBridge stays
-unaware of the API. The input is a `FrameSequence` from `sequence_capture`,
-never a single frame, because an ASL sign is defined partly by movement.
+Uses the Interactions API (`client.interactions.create`) of the google-genai
+SDK with Gemini 3.8 Flash. All Gemini access is confined to this module so the
+rest of SignBridge stays unaware of the API.
+
+The input is a `FrameSequence` from `sequence_capture`, never a single frame,
+because an ASL sign is defined partly by movement. The whole ordered sequence
+goes out as one interaction: a flat list of content items alternating a text
+label and the JPEG for each frame, so the chronology is explicit.
 
 Nothing here runs at import time, and no network call happens until
 `recognize_sequence` is called. The API key is read from the environment and is
@@ -11,8 +16,10 @@ never logged or included in an error message.
 
 from __future__ import annotations
 
+import base64
 import json
 import os
+import re
 from dataclasses import dataclass
 from typing import Any
 
@@ -23,7 +30,14 @@ from src.asl import SIGNS
 from src.asl.sequence_capture import FrameSequence
 
 API_KEY_ENV_VAR = "GEMINI_API_KEY"
-DEFAULT_MODEL = "gemini-2.5-flash"
+DEFAULT_MODEL = "gemini-3.8-flash"
+JPEG_MIME_TYPE = "image/jpeg"
+RESPONSE_MIME_TYPE = "application/json"
+
+# Interaction statuses that mean no usable answer came back.
+_FAILED_STATUSES = frozenset(
+    {"failed", "cancelled", "budget_exceeded", "incomplete", "requires_action"}
+)
 DEFAULT_JPEG_QUALITY = 80
 DEFAULT_CONFIDENCE_THRESHOLD = 0.6
 DEFAULT_REQUEST_TIMEOUT_SECONDS = 30.0
@@ -82,7 +96,9 @@ because only one hand is clearly visible in some frames.
 VOCABULARY YOU MAY REPORT
 You may only answer with one of: {", ".join(SUPPORTED_SIGNS)}.
 
-These are the only signs this prototype supports. For reference:
+This is a limited-vocabulary prototype, not a full ASL translation system. It
+supports only the signs listed above, and it does not attempt to interpret ASL
+in general. For reference:
 - "hello": a flat hand near the forehead or temple moving outward and away, like
   a salute that relaxes into a wave.
 - "yes": a fist, palm facing forward, bobbing at the wrist like a nodding head.
@@ -140,8 +156,119 @@ RESPONSE_SCHEMA: dict[str, Any] = {
 }
 
 
+REDACTED = "***REDACTED***"
+MAX_DIAGNOSTIC_MESSAGE = 600
+
+# Applied to anything from the provider before it is printed. The first pattern
+# catches a Google API key by shape, the rest catch credentials carried in
+# headers or query strings.
+_SECRET_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
+    (re.compile(r"AIza[0-9A-Za-z_\-]{10,}"), REDACTED),
+    (re.compile(r"(?i)([?&]key=)[^&\s\"']+"), r"\1" + REDACTED),
+    # Swallows an optional auth scheme, so "Authorization: Bearer <token>"
+    # redacts the token and not just the word "Bearer".
+    (
+        re.compile(
+            r"(?i)((?:x-goog-api-key|authorization|api[_-]?key)[\"']?\s*[:=]\s*[\"']?)"
+            r"(?:bearer\s+|basic\s+|token\s+)?[^\s\"',&}]+"
+        ),
+        r"\1" + REDACTED,
+    ),
+    (re.compile(r"(?i)(bearer\s+)[A-Za-z0-9._\-]{8,}"), r"\1" + REDACTED),
+)
+
+
+def redact_secrets(text: Any, extra_secrets: tuple[str, ...] = ()) -> str:
+    """Strip credentials out of provider text so it is safe to print.
+
+    Removes the configured key by exact match, then anything that merely looks
+    like a credential, so an unexpected token shape is still caught.
+    """
+    if text is None:
+        return ""
+
+    cleaned = str(text)
+    candidates = (*extra_secrets, os.environ.get(API_KEY_ENV_VAR, ""))
+    for secret in candidates:
+        secret = (secret or "").strip()
+        if len(secret) >= 8:  # ignore placeholders too short to be real
+            cleaned = cleaned.replace(secret, REDACTED)
+
+    for pattern, replacement in _SECRET_PATTERNS:
+        cleaned = pattern.sub(replacement, cleaned)
+    return cleaned
+
+
 class GeminiRecognizerError(RuntimeError):
     """Gemini could not be configured or did not return a usable answer."""
+
+
+class GeminiRequestError(GeminiRecognizerError):
+    """A Gemini request failed, with safe diagnostics attached.
+
+    Holds the exception type, HTTP status, and API status code so local
+    debugging has something to work with, while every string has been through
+    `redact_secrets`.
+    """
+
+    def __init__(
+        self,
+        error_type: str,
+        status_code: int | None = None,
+        api_status: str | None = None,
+        message: str = "",
+    ) -> None:
+        self.error_type = error_type
+        self.status_code = status_code
+        self.api_status = api_status
+        self.sanitized_message = message
+        super().__init__(self.short_message)
+
+    @classmethod
+    def from_exception(
+        cls, exc: BaseException, extra_secrets: tuple[str, ...] = ()
+    ) -> GeminiRequestError:
+        """Pull whatever detail the exception carries, redacting as we go.
+
+        `google.genai.errors.APIError` exposes `code` (HTTP status), `status`
+        (for example INVALID_ARGUMENT), and `message`. Network and timeout
+        errors have none of those, so each is read defensively.
+        """
+        status_code = getattr(exc, "code", None)
+        if not isinstance(status_code, int):
+            status_code = None
+
+        api_status = getattr(exc, "status", None)
+        api_status = str(api_status) if api_status else None
+
+        raw = getattr(exc, "message", None) or str(exc)
+        message = redact_secrets(raw, extra_secrets)
+        if len(message) > MAX_DIAGNOSTIC_MESSAGE:
+            message = message[:MAX_DIAGNOSTIC_MESSAGE] + " ...(truncated)"
+
+        return cls(type(exc).__name__, status_code, api_status, message)
+
+    @property
+    def short_message(self) -> str:
+        """One line for the on-screen display."""
+        detail = " ".join(
+            part for part in (
+                f"HTTP {self.status_code}" if self.status_code else "",
+                self.api_status or "",
+            ) if part
+        )
+        suffix = f" ({detail})" if detail else f" ({self.error_type})"
+        return f"The Gemini request failed{suffix}. See the terminal for details."
+
+    def diagnostics(self) -> str:
+        """The multi-line block printed to the terminal. Contains no secrets."""
+        lines = ["Gemini request failed", f"Error type: {self.error_type}"]
+        if self.status_code is not None:
+            lines.append(f"Status code: {self.status_code}")
+        if self.api_status:
+            lines.append(f"API status: {self.api_status}")
+        lines.append(f"Error: {self.sanitized_message or '(no message provided)'}")
+        return "\n".join(lines)
 
 
 @dataclass(frozen=True)
@@ -188,6 +315,23 @@ def api_key_from_env(env_var: str = API_KEY_ENV_VAR) -> str:
             "See the README section 'Gemini ASL Recognition'."
         )
     return key
+
+
+def interaction_output_text(interaction: Any) -> str:
+    """Pull the model's text out of a completed interaction.
+
+    The Interactions API returns a list of steps; the answer lives in the text
+    content of the `model_output` step. `Interaction.output_text` exists but is
+    deprecated, so the steps are walked instead.
+    """
+    chunks: list[str] = []
+    for step in getattr(interaction, "steps", None) or []:
+        if getattr(step, "type", None) != "model_output":
+            continue
+        for item in getattr(step, "content", None) or []:
+            if getattr(item, "type", None) == "text" and getattr(item, "text", None):
+                chunks.append(str(item.text))
+    return "".join(chunks)
 
 
 def encode_frames_to_jpeg(
@@ -241,6 +385,25 @@ class GeminiSignRecognizer:
         self._client = genai.Client(api_key=self._api_key or api_key_from_env())
         return self._client
 
+    def _raise_for_status(self, interaction: Any) -> None:
+        """Turn a non-completed interaction into a diagnosable error."""
+        status = getattr(interaction, "status", None)
+        if status is None or str(status) not in _FAILED_STATUSES:
+            return
+
+        details = "; ".join(
+            str(getattr(err, "message", None) or err)
+            for err in (getattr(interaction, "errors", None) or [])
+        )
+        raise GeminiRequestError(
+            "InteractionNotCompleted",
+            api_status=str(status),
+            message=redact_secrets(
+                details or f"The interaction finished with status {status}.",
+                (self._api_key or "",),
+            ),
+        )
+
     def recognize_sequence(self, sequence: FrameSequence) -> SignInterpretation:
         """Interpret a short frame sequence. Makes one Gemini call."""
         if not isinstance(sequence, FrameSequence):
@@ -255,67 +418,80 @@ class GeminiSignRecognizer:
             )
 
         client = self._ensure_client()
-        contents = self._build_contents(sequence)
+        model_input = self._build_input(sequence)
 
         try:
-            from google.genai import types
+            from google.genai import interactions
 
-            response = client.models.generate_content(
+            interaction = client.interactions.create(
                 model=self.config.model,
-                contents=contents,
-                config=types.GenerateContentConfig(
-                    system_instruction=SYSTEM_PROMPT,
-                    response_mime_type="application/json",
-                    response_schema=RESPONSE_SCHEMA,
+                input=model_input,
+                system_instruction=SYSTEM_PROMPT,
+                response_format=RESPONSE_SCHEMA,
+                response_mime_type=RESPONSE_MIME_TYPE,
+                generation_config=interactions.GenerationConfig(
                     temperature=self.config.temperature,
                     max_output_tokens=self.config.max_output_tokens,
-                    # Bounded so a stalled request cannot hang the demo.
-                    http_options=types.HttpOptions(
-                        timeout=int(self.config.request_timeout_seconds * 1000)
-                    ),
                 ),
+                # Seconds here, unlike the older http_options milliseconds.
+                timeout=self.config.request_timeout_seconds,
             )
         except GeminiRecognizerError:
             raise
         except Exception as exc:
-            # Deliberately reports the exception type only: provider messages
-            # can echo request details.
-            raise GeminiRecognizerError(
-                f"The Gemini request failed ({type(exc).__name__}). Check the "
-                "network connection and that the API key is valid."
+            # Keeps the status and provider message for debugging, but only
+            # after redact_secrets has been over them.
+            raise GeminiRequestError.from_exception(
+                exc, extra_secrets=(self._api_key or "",)
             ) from exc
 
-        return self._parse_response(response, len(sequence))
+        return self._parse_response(interaction, len(sequence))
 
-    def _build_contents(self, sequence: FrameSequence) -> list[Any]:
-        """Interleave labels and images so the ordering is explicit to Gemini."""
-        from google.genai import types
+    def _build_input(self, sequence: FrameSequence) -> list[Any]:
+        """Build the interaction input: one flat, ordered list of content.
+
+        Each frame is preceded by a label naming its position and timestamp, so
+        the chronology survives in the request rather than relying on list
+        order alone. The whole clip is one interaction, never one per frame.
+        """
+        from google.genai import interactions
 
         jpegs = encode_frames_to_jpeg(sequence, self.config.jpeg_quality)
         total = len(jpegs)
 
-        parts: list[Any] = [
-            types.Part.from_text(
+        items: list[Any] = [
+            interactions.TextContent(
+                type="text",
                 text=(
                     f"The following {total} frames are one continuous clip of "
                     f"{sequence.duration:.2f} seconds, in chronological order. "
                     "Identify the single ASL sign being produced across the "
                     "whole clip, or answer unknown."
-                )
+                ),
             )
         ]
         for position, (jpeg, timestamp) in enumerate(zip(jpegs, sequence.timestamps)):
-            parts.append(
-                types.Part.from_text(
-                    text=f"Frame {position + 1} of {total}, t = {timestamp:.2f}s:"
+            items.append(
+                interactions.TextContent(
+                    type="text",
+                    text=f"Frame {position + 1} of {total}, t = {timestamp:.2f}s:",
                 )
             )
-            parts.append(types.Part.from_bytes(data=jpeg, mime_type="image/jpeg"))
-        return parts
+            items.append(
+                interactions.ImageContent(
+                    type="image",
+                    mime_type=JPEG_MIME_TYPE,
+                    # The field takes base64 text, not raw bytes.
+                    data=base64.b64encode(jpeg).decode("ascii"),
+                )
+            )
+        return items
 
-    def _parse_response(self, response: Any, frame_count: int) -> SignInterpretation:
+    def _parse_response(self, interaction: Any, frame_count: int) -> SignInterpretation:
         """Validate Gemini's JSON and refuse answers outside the vocabulary."""
-        text = (getattr(response, "text", None) or "").strip()
+        self._raise_for_status(interaction)
+
+        text = interaction_output_text(interaction).strip()
         if not text:
             return SignInterpretation.unknown(
                 "Gemini returned an empty response.", frame_count
@@ -325,7 +501,8 @@ class GeminiSignRecognizer:
             payload = json.loads(text)
         except json.JSONDecodeError as exc:
             raise GeminiRecognizerError(
-                f"Gemini did not return valid JSON: {exc}"
+                "Gemini did not return valid JSON: "
+                f"{redact_secrets(exc, (self._api_key or '',))}"
             ) from exc
         if not isinstance(payload, dict):
             raise GeminiRecognizerError(

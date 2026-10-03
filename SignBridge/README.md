@@ -537,10 +537,23 @@ approach, since this classifier sees one frame at a time.
 ```
 continuous webcam
   -> short temporal capture (a 2-second window of frames)
-  -> Gemini multimodal model
+  -> Gemini 3.8 Flash, via the Interactions API
   -> structured ASL result (sign, confidence, description)
   -> application
 ```
+
+| | |
+| --- | --- |
+| Model | `gemini-3.8-flash` |
+| API | Interactions API (`client.interactions.create`) |
+| SDK | `google-genai` >= 2.28 |
+| Credential | `GEMINI_API_KEY` environment variable (required) |
+| Vocabulary | hello, yes, no, plus `unknown` |
+
+The recognizer analyzes a **temporal sequence of frames**, not individual
+frames. Earlier Gemini models and the older `generateContent` endpoint are no
+longer used: `gemini-2.5-flash` returns `404 NOT_FOUND` for new API keys, which
+is what prompted the move to 3.8 Flash and the Interactions API.
 
 ### Why a single frame is not enough
 
@@ -683,6 +696,9 @@ result.
 > **yes**, and **no**, and answers `unknown` for anything else. It is not ASL
 > translation and does not understand ASL generally.
 
+Uses **Gemini 3.8 Flash** through the **Interactions API**, and requires
+`GEMINI_API_KEY` to be set.
+
 ### Why ASL is treated as a temporal sequence
 
 A sign is a movement, not a pose. Handshape is only one of the five parameters
@@ -704,9 +720,15 @@ webcam -> SequenceCapture -> ordered frame sequence -> Gemini
        -> structured result -> display
 ```
 
-The ordered sequence goes to Gemini as **one** request with all frames
+The ordered sequence goes to Gemini as **one** interaction with all frames
 attached, each labeled with its position and timestamp. Frames are never sent
-as separate requests.
+as separate requests, and the clip is never collapsed into a single image.
+
+Concretely, the interaction `input` is one flat, ordered list of content items:
+a preamble, then for each frame a `TextContent` label (`Frame 3 of 12,
+t = 0.40s:`) followed by the frame itself as base64 JPEG `ImageContent`. The
+answer comes back as JSON constrained by a response schema whose `sign` field
+is an enum of the three signs plus `unknown`.
 
 ### Run it
 
@@ -763,7 +785,7 @@ defaults from there rather than repeating the numbers. Override per run:
 
 ```
 python -m src.asl.gemini_demo --duration 3 --sample-fps 8
-python -m src.asl.gemini_demo --model gemini-2.5-flash --threshold 0.75
+python -m src.asl.gemini_demo --model gemini-3.8-flash --threshold 0.75
 ```
 
 ### Cost and rate limiting
