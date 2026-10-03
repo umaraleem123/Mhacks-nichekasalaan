@@ -1,0 +1,5 @@
+# mediapipe pulls in opencv-contrib-python; pin a compatible stack.
+mediapipe>=0.10.14,<1.1
+numpy>=1.24.0,<3
+opencv-contrib-python>=4.8.0,<6
+pytest>=8.0.0
