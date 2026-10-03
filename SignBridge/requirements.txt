@@ -1,0 +1,7 @@
+# SignBridge dependencies.
+#
+# Added incrementally, one development milestone at a time.
+
+# Milestone 1: webcam access + hand tracking
+opencv-python
+mediapipe

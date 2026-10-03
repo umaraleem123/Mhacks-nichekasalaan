@@ -1,0 +1,53 @@
+# Byte-compiled / cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+.python-version
+
+# Packaging / build
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# Testing and tooling caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Environment / secrets
+.env
+.env.*
+
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Trained models and large artifacts (keep the directories themselves)
+models/*
+!models/.gitkeep
+
+# Captured/recorded datasets
+data/*
+!data/.gitkeep
+
+# Large media in assets/ (small reference images stay tracked)
+assets/**/*.mp4
+assets/**/*.mov
+assets/**/*.avi
+assets/**/*.webm
