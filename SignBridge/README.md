@@ -720,15 +720,24 @@ webcam -> SequenceCapture -> ordered frame sequence -> Gemini
        -> structured result -> display
 ```
 
-The ordered sequence goes to Gemini as **one** interaction with all frames
-attached, each labeled with its position and timestamp. Frames are never sent
-as separate requests, and the clip is never collapsed into a single image.
+The clip goes to Gemini as **one** interaction. Frames are never sent as
+separate requests, and the clip is never collapsed into a single image.
 
-Concretely, the interaction `input` is one flat, ordered list of content items:
-a preamble, then for each frame a `TextContent` label (`Frame 3 of 12,
-t = 0.40s:`) followed by the frame itself as base64 JPEG `ImageContent`. The
-answer comes back as JSON constrained by a response schema whose `sign` field
-is an enum of the three signs plus `unknown`.
+By default the frames are encoded into a short MP4 and sent as one
+`VideoContent` with `StaticMediaProcessing(fps=…)`. Static processing is right
+here because the whole clip is 1–2 seconds — there is nothing for agentic video
+search to explore. **The explicit `fps` matters:** default video sampling would
+thin a clip this short down to roughly one frame and destroy the movement,
+which is the one thing the sequence exists to capture.
+
+With `--frames-only`, the input is instead a flat ordered list: a preamble,
+then for each frame a `TextContent` label (`Frame 3 of 9, t = 0.33s:`) followed
+by the frame as base64 JPEG `ImageContent`. That path is also the automatic
+fallback when no video codec is available, so the temporal information survives
+either way.
+
+Either way the answer comes back as JSON constrained by a response schema whose
+`sign` field is an enum of the three signs plus `unknown`.
 
 ### Run it
 
@@ -764,10 +773,13 @@ block that moves through four states:
 
 ```
 READY       Press SPACE to capture a sign
-CAPTURING   CAPTURING SIGN...  1.8s   (with a progress bar)
-ANALYZING   ANALYZING WITH GEMINI...
-RESULT      Detected sign: HELLO / Confidence: 94% / Description: ...
+CAPTURING   CAPTURING SIGN...  1.2s   (with a progress bar)
+ANALYZING   ANALYZING...  0.8s       (elapsed timer)
+RESULT      Detected sign: HELLO / Confidence: 94%
 ```
+
+The terminal also prints how long each answer took, which is the number to
+watch when tuning the settings above.
 
 A failure shows `Gemini error` with `Press SPACE to try again.`, and the app
 keeps running.
@@ -776,25 +788,56 @@ Begin signing right when you press SPACE: capture starts immediately, so a
 late start wastes part of the window on your hand moving into position, which
 is exactly the kind of clip Gemini should answer `unknown` for.
 
-### Capture settings
+### Capture and latency settings
 
-Roughly a **2-second** clip sampled at **6 frames per second**, giving about 12
-frames per request, capped at 24 and downscaled to 640px wide. All of it lives
-in `CaptureConfig` in `src/asl/sequence_capture.py` — the demo reads its
-defaults from there rather than repeating the numbers. Override per run:
+Tuned for an interactive demo rather than maximum reasoning depth:
+
+| Setting | Value | Where |
+| --- | --- | --- |
+| Clip length | 1.5 s | `CaptureConfig.duration_seconds` |
+| Sample rate | 6 fps | `CaptureConfig.sample_fps` |
+| Frames per request | 9 (cap 12) | `CaptureConfig.max_frames` |
+| Frame width | 640 px | `CaptureConfig.max_frame_width` |
+| Thinking level | `low` | `GeminiConfig.thinking_level` |
+| Max output tokens | 200 | `GeminiConfig.max_output_tokens` |
+| Timeout | 20 s | `GeminiConfig.request_timeout_seconds` |
+| Retries | none | `GeminiConfig.retry_attempts` |
+
+Every value lives in one of those two config objects; the demo reads its
+defaults from them rather than repeating the numbers. Override per run:
 
 ```
-python -m src.asl.gemini_demo --duration 3 --sample-fps 8
-python -m src.asl.gemini_demo --model gemini-3.8-flash --threshold 0.75
+python -m src.asl.gemini_demo --duration 1.2 --sample-fps 5
+python -m src.asl.gemini_demo --thinking minimal --timeout 10
+python -m src.asl.gemini_demo --frames-only --threshold 0.75
 ```
+
+Three things were traded for speed: `thinking_level` is `low` rather than the
+default, since classifying three signs needs recognition and not deliberation;
+thought summaries are off; and the prompt asks for JSON only, with
+`description` optional in the schema so no prose is required. What was **not**
+traded is the temporal sequence — nine frames still show a trajectory, and a
+single frame is rejected outright.
 
 ### Cost and rate limiting
 
-One key press is one request. Nothing is automatic: there is no continuous
-recognition, no retry on failure, and no request triggered by hand detection.
-A single-worker thread pool runs the call, which is what keeps the video live
-while waiting and also guarantees one request at a time. Requests time out
-after 30 seconds.
+One key press is one request, and one request is exactly one HTTP attempt. The
+SDK does not retry unless retry options are supplied, and none are, so a busy
+service fails fast instead of making you sit through exponential backoff.
+Raising `retry_attempts` above 1 opts into the SDK's own backoff rather than a
+second retry loop.
+
+Nothing is automatic: no continuous recognition, no retry on failure, and no
+request triggered by hand detection. A single-worker thread pool runs the call,
+which keeps the video live while waiting and guarantees one request at a time.
+
+Errors are reported plainly and the app stays usable:
+
+| Condition | On screen |
+| --- | --- |
+| HTTP 429 / 503, `RESOURCE_EXHAUSTED`, `UNAVAILABLE` | `Gemini is currently busy. Please try again.` |
+| Timeout, HTTP 408 / 504 | `Gemini request timed out.` |
+| Anything else | status code plus a pointer to the terminal |
 
 ### Privacy
 

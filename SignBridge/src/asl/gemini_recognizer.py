@@ -20,7 +20,9 @@ import base64
 import json
 import os
 import re
+import tempfile
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 import cv2
@@ -32,7 +34,19 @@ from src.asl.sequence_capture import FrameSequence
 API_KEY_ENV_VAR = "GEMINI_API_KEY"
 DEFAULT_MODEL = "gemini-3.8-flash"
 JPEG_MIME_TYPE = "image/jpeg"
+VIDEO_MIME_TYPE = "video/mp4"
 RESPONSE_MIME_TYPE = "application/json"
+
+# Latency settings. A hackathon demo needs an answer in a few seconds, so
+# reasoning depth is traded away deliberately.
+DEFAULT_THINKING_LEVEL = "low"
+DEFAULT_MAX_OUTPUT_TOKENS = 200
+DEFAULT_REQUEST_TIMEOUT_SECONDS = 20.0
+
+# H.264 first for the smallest payload, MPEG-4 Part 2 as the portable
+# fallback. Both were confirmed to encode through OpenCV's ffmpeg build.
+VIDEO_CODECS: tuple[str, ...] = ("avc1", "mp4v")
+MIN_VIDEO_FPS = 2.0
 
 # Interaction statuses that mean no usable answer came back.
 _FAILED_STATUSES = frozenset(
@@ -40,7 +54,6 @@ _FAILED_STATUSES = frozenset(
 )
 DEFAULT_JPEG_QUALITY = 80
 DEFAULT_CONFIDENCE_THRESHOLD = 0.6
-DEFAULT_REQUEST_TIMEOUT_SECONDS = 30.0
 
 UNKNOWN_SIGN = "unknown"
 
@@ -49,85 +62,43 @@ SUPPORTED_SIGNS: tuple[str, ...] = tuple(SIGNS)
 ALLOWED_ANSWERS: tuple[str, ...] = SUPPORTED_SIGNS + (UNKNOWN_SIGN,)
 
 SYSTEM_PROMPT = f"""\
-You are an American Sign Language (ASL) recognition component inside an
-assistive communication tool. Your judgments affect how a Deaf or
-hard-of-hearing person is understood, so being accurate matters far more than
-being decisive.
+You recognize American Sign Language (ASL) signs for an assistive tool. ASL is
+a real language, not a set of static poses. Accuracy matters more than
+answering.
 
-ASL is a complete natural language with its own grammar and phonology. It is
-not English spelled out with hands, and it is not a set of static gestures.
+INPUT: a short clip of ONE signing event, about 1-2 seconds, given either as a
+video or as frames in chronological order. Interpret it temporally.
 
-THE INPUT IS A TEMPORAL SEQUENCE, NOT A PHOTOGRAPH
-You receive several still frames sampled in chronological order from a short
-video clip of one ASL signing event, roughly one to three seconds long. Each
-image is labeled with its position in the sequence and the time in seconds
-since the clip began. Read them as consecutive moments of one continuous
-motion, and interpret the clip temporally.
+The change between frames is the evidence. Movement is often the only thing
+separating two signs, so never classify from a single frame: a frame is one
+slice through a motion, and unrelated signs pass through identical handshapes
+at different instants. The hand's location, orientation, and configuration can
+all change mid-sign, and a mid-sign pose may be only a transition. Judge the
+whole clip.
 
-The change between consecutive frames is itself the evidence. Movement is not
-noise to look past; it is frequently the only thing that separates one sign
-from another.
+Weigh all five parameters: handshape, palm orientation, location, movement
+(path, direction, repetition), and any visible non-manual signals. One or both
+hands may be involved; do not assume one-handed just because a frame shows one.
 
-Never treat any single frame as the whole sign, and never classify from one
-frame alone. One frame is a slice through a movement. A sign and a completely
-unrelated sign can pass through identical handshapes at different instants, so
-a pose you recognize in frame three is evidence about frame three only.
+VOCABULARY. Answer only with: {", ".join(SUPPORTED_SIGNS)}, or "unknown".
+This is a limited-vocabulary prototype, not full ASL translation.
+- "hello": flat hand at forehead or temple, moving outward and away.
+- "yes": fist, palm forward, bobbing at the wrist like a nod.
+- "no": index and middle fingers snap down onto the thumb, once and quickly.
 
-Expect the hand to change during the sign. Its location, its orientation, and
-its configuration can all differ between the start and the end of the clip, and
-a handshape that appears mid-sign may be a transition rather than the sign
-itself. Examine every frame and decide what happened across the whole clip
-before you answer.
+ANSWER "unknown" whenever evidence is insufficient: a sign outside the
+vocabulary, a hand moving into or out of position, a still or resting hand,
+blur or occlusion hiding a parameter, motion fitting more than one sign, or no
+hand visible. "unknown" is a correct answer and is preferred over a guess.
+Never invent a sign, and never pick the nearest supported one for a gesture
+that is not in the list.
 
-WHAT TO ANALYZE
-ASL signs are distinguished by five parameters, and you should weigh all of
-them:
-1. Handshape, including how it changes during the sign.
-2. Palm orientation and how it rotates.
-3. Location relative to the body, head, and neutral signing space.
-4. Movement: its path, direction, repetition, and size. This is the parameter a
-   single frame cannot show, and often the one that decides the answer.
-5. Non-manual signals such as head movement, when visible.
+CONFIDENCE: your genuine probability from 0.0 to 1.0. Keep it low when the
+evidence is thin.
 
-One or two hands may be involved. Note whether one hand is dominant and whether
-the other is a stationary base, and do not assume a sign is one-handed just
-because only one hand is clearly visible in some frames.
-
-VOCABULARY YOU MAY REPORT
-You may only answer with one of: {", ".join(SUPPORTED_SIGNS)}.
-
-This is a limited-vocabulary prototype, not a full ASL translation system. It
-supports only the signs listed above, and it does not attempt to interpret ASL
-in general. For reference:
-- "hello": a flat hand near the forehead or temple moving outward and away, like
-  a salute that relaxes into a wave.
-- "yes": a fist, palm facing forward, bobbing at the wrist like a nodding head.
-- "no": the index and middle fingers close down onto the thumb in a single quick
-  snapping motion.
-
-ANSWERING HONESTLY
-Answer "unknown" whenever the clip does not give you sufficient evidence for one
-of those signs. "unknown" is a correct, useful answer and is strongly preferred
-over a guess. Specifically answer "unknown" when:
-- the signer is clearly producing some sign outside the supported vocabulary;
-- the hand is moving into or out of position rather than signing;
-- the hand is still, idle, or resting;
-- motion blur, framing, or occlusion hides a parameter you would need;
-- the movement is consistent with more than one supported sign;
-- no hand is visible.
-
-Do not invent a sign because you feel obliged to choose. Do not pick the
-nearest supported sign for a gesture that is not one of them. Do not let a
-single convincing frame override what the rest of the sequence shows.
-
-CONFIDENCE
-Report confidence as your genuine probability that the sign is correct, from
-0.0 to 1.0. It should be low when evidence is thin. Do not inflate it, and do
-not report high confidence merely because the handshape looked familiar.
-
-In the description field, state briefly what movement you actually observed
-across the frames, and say which parameter decided your answer or which one was
-missing. Describe only what is in the frames.
+OUTPUT: the JSON object only. No reasoning, no step-by-step explanation, no
+prose outside the fields. Keep `description` to at most one short clause naming
+the movement you saw, or omit it.
 """
 
 # Matches the SignInterpretation fields below.
@@ -149,10 +120,12 @@ RESPONSE_SCHEMA: dict[str, Any] = {
         },
         "description": {
             "type": "string",
-            "description": "The movement observed across the sequence.",
+            "description": "Optional. At most one short clause; may be omitted.",
         },
     },
-    "required": ["recognized", "sign", "confidence", "description"],
+    # `description` is deliberately not required: the recognition result does
+    # not depend on it, and demanding prose costs output tokens and latency.
+    "required": ["recognized", "sign", "confidence"],
 }
 
 
@@ -211,6 +184,12 @@ class GeminiRequestError(GeminiRecognizerError):
     `redact_secrets`.
     """
 
+    BUSY_MESSAGE = "Gemini is currently busy. Please try again."
+    TIMEOUT_MESSAGE = "Gemini request timed out."
+
+    # 429 too many requests, 503 unavailable: the service is overloaded.
+    BUSY_STATUS_CODES = frozenset({429, 503})
+
     def __init__(
         self,
         error_type: str,
@@ -223,6 +202,29 @@ class GeminiRequestError(GeminiRecognizerError):
         self.api_status = api_status
         self.sanitized_message = message
         super().__init__(self.short_message)
+
+    @property
+    def is_busy(self) -> bool:
+        """Transient overload, worth retrying by hand but not automatically."""
+        if self.status_code in self.BUSY_STATUS_CODES:
+            return True
+        status = (self.api_status or "").upper()
+        return status in {"RESOURCE_EXHAUSTED", "UNAVAILABLE"}
+
+    @property
+    def is_timeout(self) -> bool:
+        if self.status_code in (408, 504):
+            return True
+        return "timeout" in self.error_type.lower()
+
+    @property
+    def user_message(self) -> str:
+        """What the window shows: plain, actionable, no provider text."""
+        if self.is_timeout:
+            return self.TIMEOUT_MESSAGE
+        if self.is_busy:
+            return self.BUSY_MESSAGE
+        return self.short_message
 
     @classmethod
     def from_exception(
@@ -279,8 +281,18 @@ class GeminiConfig:
     temperature: float = 0.0  # recognition should be repeatable, not creative
     jpeg_quality: int = DEFAULT_JPEG_QUALITY
     confidence_threshold: float = DEFAULT_CONFIDENCE_THRESHOLD
-    max_output_tokens: int | None = None
     request_timeout_seconds: float = DEFAULT_REQUEST_TIMEOUT_SECONDS
+
+    # Latency levers.
+    thinking_level: str = DEFAULT_THINKING_LEVEL
+    max_output_tokens: int | None = DEFAULT_MAX_OUTPUT_TOKENS
+    send_as_video: bool = True
+    media_resolution: str | None = None  # None lets the API choose
+
+    # 1 means a single attempt. The SDK never retries unless retry options are
+    # supplied, and anything above 1 adds exponential backoff the user waits
+    # through, so this stays at 1 to keep the demo responsive.
+    retry_attempts: int = 1
 
 
 @dataclass(frozen=True)
@@ -334,6 +346,56 @@ def interaction_output_text(interaction: Any) -> str:
     return "".join(chunks)
 
 
+def sequence_fps(sequence: FrameSequence) -> float:
+    """Playback rate implied by the frame timestamps.
+
+    Used both for encoding and for telling Gemini how to sample the clip, so
+    the video plays back at the speed the movement actually happened.
+    """
+    if len(sequence) < 2 or sequence.duration <= 0:
+        return MIN_VIDEO_FPS
+    return max(MIN_VIDEO_FPS, (len(sequence) - 1) / sequence.duration)
+
+
+def encode_sequence_to_video(
+    sequence: FrameSequence, codecs: tuple[str, ...] = VIDEO_CODECS
+) -> tuple[bytes, float] | None:
+    """Encode the frames into a short MP4, returning (bytes, fps).
+
+    Returns None when no codec in `codecs` is usable, which lets the caller
+    fall back to sending individual frames rather than failing the request.
+
+    OpenCV's writer needs a path, so this goes through a temporary directory
+    that is removed immediately; the clip is never left on disk.
+    """
+    if not sequence.shows_movement:
+        return None
+
+    first = sequence.frames[0].image
+    height, width = first.shape[:2]
+    fps = sequence_fps(sequence)
+
+    with tempfile.TemporaryDirectory(prefix="signbridge-") as directory:
+        path = Path(directory) / "clip.mp4"
+        for codec in codecs:
+            writer = cv2.VideoWriter(
+                str(path), cv2.VideoWriter_fourcc(*codec), fps, (width, height)
+            )
+            if not writer.isOpened():
+                writer.release()
+                continue
+            try:
+                for frame in sequence:
+                    writer.write(frame.image)
+            finally:
+                writer.release()
+
+            if path.is_file() and path.stat().st_size > 0:
+                return path.read_bytes(), fps
+            path.unlink(missing_ok=True)
+    return None
+
+
 def encode_frames_to_jpeg(
     sequence: FrameSequence, quality: int = DEFAULT_JPEG_QUALITY
 ) -> list[bytes]:
@@ -382,8 +444,28 @@ class GeminiSignRecognizer:
                 "  python -m pip install -r requirements.txt"
             ) from exc
 
-        self._client = genai.Client(api_key=self._api_key or api_key_from_env())
+        self._client = genai.Client(
+            api_key=self._api_key or api_key_from_env(),
+            http_options=self._http_options(),
+        )
         return self._client
+
+    def _http_options(self) -> Any | None:
+        """Retry policy, or None to keep the SDK default of no retries.
+
+        The SDK retries nothing unless retry options are supplied, so leaving
+        this at None means one SPACE press is exactly one HTTP attempt. Raising
+        `retry_attempts` opts into the SDK's own exponential backoff rather
+        than adding a second retry loop here.
+        """
+        if self.config.retry_attempts <= 1:
+            return None
+
+        from google.genai import types
+
+        return types.HttpOptions(
+            retry_options=types.HttpRetryOptions(attempts=self.config.retry_attempts)
+        )
 
     def _raise_for_status(self, interaction: Any) -> None:
         """Turn a non-completed interaction into a diagnosable error."""
@@ -432,6 +514,10 @@ class GeminiSignRecognizer:
                 generation_config=interactions.GenerationConfig(
                     temperature=self.config.temperature,
                     max_output_tokens=self.config.max_output_tokens,
+                    # Classifying three signs needs recognition, not
+                    # deliberation; deep thinking is the main latency cost.
+                    thinking_level=self.config.thinking_level,
+                    thinking_summaries="none",
                 ),
                 # Seconds here, unlike the older http_options milliseconds.
                 timeout=self.config.request_timeout_seconds,
@@ -448,11 +534,56 @@ class GeminiSignRecognizer:
         return self._parse_response(interaction, len(sequence))
 
     def _build_input(self, sequence: FrameSequence) -> list[Any]:
-        """Build the interaction input: one flat, ordered list of content.
+        """Build the interaction input for the whole clip, in one request.
 
-        Each frame is preceded by a label naming its position and timestamp, so
-        the chronology survives in the request rather than relying on list
-        order alone. The whole clip is one interaction, never one per frame.
+        Prefers a short MP4, which carries the same frames in a fraction of
+        the payload of the equivalent JPEGs. Falls back to the labeled frame
+        sequence if no video codec is available, so the temporal information
+        survives either way.
+        """
+        if self.config.send_as_video:
+            encoded = encode_sequence_to_video(sequence)
+            if encoded is not None:
+                return self._build_video_input(sequence, *encoded)
+        return self._build_frames_input(sequence)
+
+    def _build_video_input(
+        self, sequence: FrameSequence, video: bytes, fps: float
+    ) -> list[Any]:
+        """One video part, processed statically at the clip's own frame rate."""
+        from google.genai import interactions
+
+        content = interactions.VideoContent(
+            type="video",
+            mime_type=VIDEO_MIME_TYPE,
+            data=base64.b64encode(video).decode("ascii"),
+            # Static processing: the whole clip is 1-2 seconds, so there is
+            # nothing for agentic search to explore. Passing fps explicitly
+            # matters -- the default sampling would thin a clip this short down
+            # to roughly one frame and destroy the movement.
+            processing=interactions.StaticMediaProcessing(type="static", fps=fps),
+        )
+        if self.config.media_resolution:
+            content.resolution = self.config.media_resolution
+
+        return [
+            interactions.TextContent(
+                type="text",
+                text=(
+                    f"This is one continuous {sequence.duration:.2f} second clip "
+                    f"of a single ASL signing event, {len(sequence)} frames at "
+                    f"{fps:.1f} fps. Identify the sign produced across the whole "
+                    "clip, or answer unknown."
+                ),
+            ),
+            content,
+        ]
+
+    def _build_frames_input(self, sequence: FrameSequence) -> list[Any]:
+        """Fallback: each frame labeled with its position and timestamp.
+
+        The chronology survives in the labels rather than relying on list
+        order alone. Still one interaction, never one request per frame.
         """
         from google.genai import interactions
 

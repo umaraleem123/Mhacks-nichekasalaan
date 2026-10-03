@@ -22,6 +22,7 @@ from __future__ import annotations
 import argparse
 import sys
 import textwrap
+import time
 from concurrent.futures import Future, ThreadPoolExecutor
 from enum import Enum
 
@@ -79,6 +80,7 @@ class DemoSession:
         self._executor = executor or ThreadPoolExecutor(max_workers=1)
         self._owns_executor = executor is None
         self._pending: Future[SignInterpretation] | None = None
+        self._analyzing_since: float | None = None
 
         self.status = Status.READY
         self.result: SignInterpretation | None = None
@@ -104,6 +106,13 @@ class DemoSession:
     @property
     def frames_captured(self) -> int:
         return self._capture.frame_count
+
+    @property
+    def analyzing_elapsed(self) -> float:
+        """Seconds spent waiting on Gemini, for the on-screen timer."""
+        if self._analyzing_since is None:
+            return 0.0
+        return time.perf_counter() - self._analyzing_since
 
     def request_capture(self) -> bool:
         """Handle SPACE. Returns False when ignored because work is in flight."""
@@ -139,6 +148,7 @@ class DemoSession:
             return
 
         self.status = Status.ANALYZING
+        self._analyzing_since = time.perf_counter()
         self._pending = self._executor.submit(
             self._recognizer.recognize_sequence, sequence
         )
@@ -149,14 +159,17 @@ class DemoSession:
             return
 
         pending, self._pending = self._pending, None
+        elapsed = self.analyzing_elapsed
+        self._analyzing_since = None
         try:
             self.result = pending.result()
             self.status = Status.RESULT
+            print(f"Gemini answered in {elapsed:.1f}s")
         except GeminiRequestError as exc:
             # Full detail to the terminal for debugging, one line on screen.
             # Both have already been through redact_secrets.
             self.status = Status.ERROR
-            self.error = exc.short_message
+            self.error = exc.user_message
             print(exc.diagnostics(), file=sys.stderr)
         except GeminiRecognizerError as exc:
             self.status = Status.ERROR
@@ -184,7 +197,8 @@ def status_lines(session: DemoSession) -> list[str]:
         lines.append(f"{session.capture_remaining:.1f}s")
         lines.append(f"frames: {session.frames_captured}")
     elif session.status is Status.ANALYZING:
-        lines.append("ANALYZING WITH GEMINI...")
+        lines.append("ANALYZING...")
+        lines.append(f"{session.analyzing_elapsed:.1f}s")
     elif session.status is Status.RESULT and session.result is not None:
         result = session.result
         lines.append("Detected sign:")
@@ -255,9 +269,23 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--max-frames", type=int, default=defaults.max_frames,
         help="hard cap on frames per sequence",
     )
+    gemini_defaults = GeminiConfig()
     parser.add_argument(
-        "--threshold", type=float, default=GeminiConfig().confidence_threshold,
+        "--threshold", type=float, default=gemini_defaults.confidence_threshold,
         help="below this confidence the result is reported as unknown",
+    )
+    parser.add_argument(
+        "--thinking", default=gemini_defaults.thinking_level,
+        choices=("minimal", "low", "medium", "high"),
+        help="Gemini reasoning effort; low keeps the demo responsive",
+    )
+    parser.add_argument(
+        "--timeout", type=float, default=gemini_defaults.request_timeout_seconds,
+        help="seconds before the request is abandoned",
+    )
+    parser.add_argument(
+        "--frames-only", action="store_true",
+        help="send labeled JPEG frames instead of a short video",
     )
     parser.add_argument(
         "--camera", type=int, default=None,
@@ -325,13 +353,23 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     recognizer = GeminiSignRecognizer(
-        config=GeminiConfig(model=args.model, confidence_threshold=args.threshold)
+        config=GeminiConfig(
+            model=args.model,
+            confidence_threshold=args.threshold,
+            thinking_level=args.thinking,
+            request_timeout_seconds=args.timeout,
+            send_as_video=not args.frames_only,
+        )
     )
-    print(f"Model: {args.model}")
+    print(f"Model: {args.model}  (thinking: {args.thinking})")
     print(
         f"Capture: {capture_config.duration_seconds:.1f}s at "
         f"{capture_config.sample_fps:g} fps "
         f"(~{capture_config.target_frame_count} frames per request)"
+    )
+    print(
+        f"Sending as: {'short video' if not args.frames_only else 'labeled frames'}"
+        f"    timeout: {args.timeout:g}s    retries: none"
     )
     print(f"Signs: {', '.join(recognizer.supported_signs)}, or unknown")
     print("SPACE = capture and send one request    Q = quit")

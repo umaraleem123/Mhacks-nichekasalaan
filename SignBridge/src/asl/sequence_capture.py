@@ -34,9 +34,12 @@ from typing import Callable, Iterator
 import cv2
 import numpy as np
 
-DEFAULT_DURATION_SECONDS = 2.0
+# Tuned for an interactive demo: long enough to contain the movement of a
+# one-handed sign, short enough that the whole SPACE-to-answer round trip stays
+# in the few-seconds range. Nine frames still shows a trajectory; one would not.
+DEFAULT_DURATION_SECONDS = 1.5
 DEFAULT_SAMPLE_FPS = 6.0
-DEFAULT_MAX_FRAMES = 24
+DEFAULT_MAX_FRAMES = 12
 DEFAULT_MAX_FRAME_WIDTH = 640
 
 
