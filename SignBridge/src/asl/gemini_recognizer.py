@@ -26,6 +26,7 @@ API_KEY_ENV_VAR = "GEMINI_API_KEY"
 DEFAULT_MODEL = "gemini-2.5-flash"
 DEFAULT_JPEG_QUALITY = 80
 DEFAULT_CONFIDENCE_THRESHOLD = 0.6
+DEFAULT_REQUEST_TIMEOUT_SECONDS = 30.0
 
 UNKNOWN_SIGN = "unknown"
 
@@ -43,15 +44,26 @@ ASL is a complete natural language with its own grammar and phonology. It is
 not English spelled out with hands, and it is not a set of static gestures.
 
 THE INPUT IS A TEMPORAL SEQUENCE, NOT A PHOTOGRAPH
-You receive several still frames sampled in order from a short video clip,
-roughly one to three seconds long. Each image is labeled with its position in
-the sequence and the time in seconds since the clip began. Read them as
-consecutive moments of one continuous motion.
+You receive several still frames sampled in chronological order from a short
+video clip of one ASL signing event, roughly one to three seconds long. Each
+image is labeled with its position in the sequence and the time in seconds
+since the clip began. Read them as consecutive moments of one continuous
+motion, and interpret the clip temporally.
 
-Never treat any single frame as the whole sign. One frame is a slice through a
-movement. A sign and a completely unrelated sign can pass through identical
-handshapes at different instants, so a pose you recognize in frame three is
-evidence about frame three only. Decide what happened across the whole clip.
+The change between consecutive frames is itself the evidence. Movement is not
+noise to look past; it is frequently the only thing that separates one sign
+from another.
+
+Never treat any single frame as the whole sign, and never classify from one
+frame alone. One frame is a slice through a movement. A sign and a completely
+unrelated sign can pass through identical handshapes at different instants, so
+a pose you recognize in frame three is evidence about frame three only.
+
+Expect the hand to change during the sign. Its location, its orientation, and
+its configuration can all differ between the start and the end of the clip, and
+a handshape that appears mid-sign may be a transition rather than the sign
+itself. Examine every frame and decide what happened across the whole clip
+before you answer.
 
 WHAT TO ANALYZE
 ASL signs are distinguished by five parameters, and you should weigh all of
@@ -141,6 +153,7 @@ class GeminiConfig:
     jpeg_quality: int = DEFAULT_JPEG_QUALITY
     confidence_threshold: float = DEFAULT_CONFIDENCE_THRESHOLD
     max_output_tokens: int | None = None
+    request_timeout_seconds: float = DEFAULT_REQUEST_TIMEOUT_SECONDS
 
 
 @dataclass(frozen=True)
@@ -256,6 +269,10 @@ class GeminiSignRecognizer:
                     response_schema=RESPONSE_SCHEMA,
                     temperature=self.config.temperature,
                     max_output_tokens=self.config.max_output_tokens,
+                    # Bounded so a stalled request cannot hang the demo.
+                    http_options=types.HttpOptions(
+                        timeout=int(self.config.request_timeout_seconds * 1000)
+                    ),
                 ),
             )
         except GeminiRecognizerError:

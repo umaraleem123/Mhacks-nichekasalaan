@@ -1,14 +1,14 @@
 # SignBridge
 
-> **Status: Milestone 3 — moving ASL recognition to Gemini.** Hand tracking
-> works. The single-frame classifier from Milestone 2 is superseded, because a
-> still image cannot show the movement that defines a sign. Recognition is
-> moving to a short temporal capture analyzed by a multimodal model; the
-> capture and client exist but are not yet wired into a running app. Speech and
-> the UI are not built. See [Development Setup](#development-setup),
+> **Status: Milestone 3 — Gemini temporal ASL recognition.** Hand tracking
+> works, and a runnable demo records a short clip on a key press and has Gemini
+> interpret it. The single-frame classifier from Milestone 2 is superseded,
+> because a still image cannot show the movement that defines a sign. Speech
+> and the UI are not built. See [Development Setup](#development-setup),
 > [Milestone 1 — Hand Tracking](#milestone-1--hand-tracking),
-> [Milestone 2 — ASL Recognition](#milestone-2--asl-recognition), and
-> [Gemini ASL Recognition](#gemini-asl-recognition).
+> [Milestone 2 — ASL Recognition](#milestone-2--asl-recognition),
+> [Gemini ASL Recognition](#gemini-asl-recognition), and
+> [Milestone 3 — Gemini Temporal ASL Recognition](#milestone-3--gemini-temporal-asl-recognition).
 
 SignBridge is a bidirectional communication system that bridges American Sign
 Language and spoken English, built as a 24-hour hackathon MVP. It is a
@@ -669,7 +669,118 @@ written to disk.
 ### Current limitations
 
 - Three signs only, and no claim beyond them.
-- Not connected to a live application; no continuous or automatic requests.
-- Untested against the real API — every test to date uses a stub client.
-- No batching, retries, rate limiting, or cost controls.
-- Static, single-sign clips only; no continuous signing or sentence structure.
+- Untested against the real API — every automated test uses a stub client.
+- No retries and no batching.
+- Single-sign clips only; no continuous signing or sentence structure.
+
+## Milestone 3 — Gemini Temporal ASL Recognition
+
+The first runnable Gemini integration. You press SPACE, it records a short clip
+of one sign, sends the whole clip to Gemini in one request, and shows the
+result.
+
+> **Prototype with a three-sign vocabulary.** This recognizes **hello**,
+> **yes**, and **no**, and answers `unknown` for anything else. It is not ASL
+> translation and does not understand ASL generally.
+
+### Why ASL is treated as a temporal sequence
+
+A sign is a movement, not a pose. Handshape is only one of the five parameters
+that distinguish ASL signs; the others are palm orientation, location in
+signing space, non-manual signals, and **movement**, which no still image can
+show.
+
+"yes" is a fist bobbing at the wrist. "no" is two fingers snapping down onto
+the thumb. Freeze either at the wrong instant and you have a fist — the
+handshape does not separate them, the motion does. Two unrelated signs can also
+pass through identical poses at different moments, so a confident reading of one
+frame can be confidently wrong.
+
+So the pipeline is built as `frames over time -> Gemini -> sign`, never
+`frame -> Gemini -> sign`:
+
+```
+webcam -> SequenceCapture -> ordered frame sequence -> Gemini
+       -> structured result -> display
+```
+
+The ordered sequence goes to Gemini as **one** request with all frames
+attached, each labeled with its position and timestamp. Frames are never sent
+as separate requests.
+
+### Run it
+
+Set your key first (see [Setup](#setup) above), then from `SignBridge/` with
+the virtual environment active.
+
+macOS:
+
+```bash
+python -m src.asl.gemini_demo
+```
+
+Windows PowerShell:
+
+```powershell
+python -m src.asl.gemini_demo
+```
+
+### Controls
+
+| Key | Action |
+| --- | --- |
+| `SPACE` | record one clip and send one Gemini request |
+| `Q` | quit |
+
+`SPACE` is ignored while capturing or analyzing, so a key press cannot queue up
+extra requests.
+
+### What you will see
+
+The window shows the mirrored camera with hand landmarks drawn, and a status
+block that moves through four states:
+
+```
+READY       Press SPACE to capture a sign
+CAPTURING   CAPTURING SIGN...  1.8s   (with a progress bar)
+ANALYZING   ANALYZING WITH GEMINI...
+RESULT      Detected sign: HELLO / Confidence: 94% / Description: ...
+```
+
+A failure shows `Gemini error` with `Press SPACE to try again.`, and the app
+keeps running.
+
+Begin signing right when you press SPACE: capture starts immediately, so a
+late start wastes part of the window on your hand moving into position, which
+is exactly the kind of clip Gemini should answer `unknown` for.
+
+### Capture settings
+
+Roughly a **2-second** clip sampled at **6 frames per second**, giving about 12
+frames per request, capped at 24 and downscaled to 640px wide. All of it lives
+in `CaptureConfig` in `src/asl/sequence_capture.py` — the demo reads its
+defaults from there rather than repeating the numbers. Override per run:
+
+```
+python -m src.asl.gemini_demo --duration 3 --sample-fps 8
+python -m src.asl.gemini_demo --model gemini-2.5-flash --threshold 0.75
+```
+
+### Cost and rate limiting
+
+One key press is one request. Nothing is automatic: there is no continuous
+recognition, no retry on failure, and no request triggered by hand detection.
+A single-worker thread pool runs the call, which is what keeps the video live
+while waiting and also guarantees one request at a time. Requests time out
+after 30 seconds.
+
+### Privacy
+
+Captured frames exist in memory only for the duration of the request and are
+never written to disk. The frames sent are the clean mirrored camera frames —
+landmarks and status text are drawn only on the copy you see on screen, so
+Gemini receives the hand rather than our overlay.
+
+Webcam frames do leave the machine: they go to Google's API when you press
+SPACE, and only then. The API key is read from `GEMINI_API_KEY` and is never
+displayed, logged, or included in an error message.
