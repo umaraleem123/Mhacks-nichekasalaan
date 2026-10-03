@@ -7,3 +7,5 @@ __pycache__/
 *_fingers.jpg
 *_fingers.png
 *.mp4
+.coverage
+htmlcov/
