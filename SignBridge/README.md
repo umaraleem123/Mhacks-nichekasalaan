@@ -1,11 +1,14 @@
 # SignBridge
 
-> **Status: Milestone 2 — ASL recognition.** Hand tracking works, and the sign
-> classifier (collect, train, recognize) is in place for hello / yes / no.
-> Speech and the UI are not built yet. See
-> [Development Setup](#development-setup),
-> [Milestone 1 — Hand Tracking](#milestone-1--hand-tracking), and
-> [Milestone 2 — ASL Recognition](#milestone-2--asl-recognition).
+> **Status: Milestone 3 — moving ASL recognition to Gemini.** Hand tracking
+> works. The single-frame classifier from Milestone 2 is superseded, because a
+> still image cannot show the movement that defines a sign. Recognition is
+> moving to a short temporal capture analyzed by a multimodal model; the
+> capture and client exist but are not yet wired into a running app. Speech and
+> the UI are not built. See [Development Setup](#development-setup),
+> [Milestone 1 — Hand Tracking](#milestone-1--hand-tracking),
+> [Milestone 2 — ASL Recognition](#milestone-2--asl-recognition), and
+> [Gemini ASL Recognition](#gemini-asl-recognition).
 
 SignBridge is a bidirectional communication system that bridges American Sign
 Language and spoken English, built as a 24-hour hackathon MVP. It is a
@@ -515,3 +518,158 @@ Retraining rebuilds the model from everything in `data/asl/`, so existing signs
 are kept. Expect accuracy to dip as the vocabulary grows and signs start to
 resemble each other; signs that differ only by motion will need a different
 approach, since this classifier sees one frame at a time.
+
+> **Superseded by Milestone 3.** That last limitation is exactly why this
+> approach was set aside. The single-frame classifier code is still here and
+> still runs, but the hello/yes/no samples and the trained model were deleted,
+> so you would need to collect data again before using it. See
+> [Gemini ASL Recognition](#gemini-asl-recognition).
+
+## Gemini ASL Recognition
+
+> **Status: prototype, work in progress.** The temporal capture and the Gemini
+> client exist and are unit tested, but nothing is wired into a running
+> application yet. This does **not** provide ASL translation, and it recognizes
+> only three signs.
+
+### Architecture
+
+```
+continuous webcam
+  -> short temporal capture (a 2-second window of frames)
+  -> Gemini multimodal model
+  -> structured ASL result (sign, confidence, description)
+  -> application
+```
+
+### Why a single frame is not enough
+
+The earlier classifier treated a sign as one hand pose, which cannot work,
+because handshape is only one of the five parameters that distinguish ASL
+signs. The others are palm orientation, location in signing space, non-manual
+signals, and **movement** — and movement is invisible in a still image.
+
+Concretely: "yes" is a fist bobbing at the wrist, and "no" is two fingers
+snapping down onto the thumb. Freeze either one at the wrong instant and you
+get a fist. The handshape is not what separates them; the motion is. Worse, two
+unrelated signs can pass through *identical* poses at different moments, so a
+confident read of one frame can be confidently wrong.
+
+That is why the Gemini path is deliberately built as:
+
+```
+frames over time -> Gemini -> sign
+```
+
+and never as `frame -> Gemini -> sign`. The recognizer enforces this: handing
+`recognize_sequence` a bare image raises an error, and a sequence of fewer than
+two frames returns `unknown` without spending an API call.
+
+### How the temporal capture works
+
+`src/asl/sequence_capture.py` holds a rolling, rate-limited buffer and is
+completely independent of Gemini — it only collects frames.
+
+A sequence is an ordered list of frames, oldest first, each tagged with the
+seconds elapsed since the capture began. Ordering carries meaning here, so
+nothing ever reorders it.
+
+Feed every camera frame to `add_frame()`; three settings in `CaptureConfig`
+keep memory and payload bounded:
+
+| Setting | Default | Purpose |
+| --- | --- | --- |
+| `duration_seconds` | 2.0 | length of the captured window |
+| `sample_fps` | 6.0 | thins the ~30 fps camera stream |
+| `max_frames` | 24 | hard cap, enforced by a fixed-length deque |
+| `max_frame_width` | 640 | downscales wide frames before storing |
+
+With the defaults, a 2-second capture stores 12 frames rather than the ~60 the
+camera produced. Near-identical frames add payload without adding information
+about the movement. Every value lives in `CaptureConfig`, so change it in one
+place:
+
+```python
+from src.asl.sequence_capture import CaptureConfig, SequenceCapture
+
+capture = SequenceCapture(CaptureConfig(duration_seconds=3.0, sample_fps=8.0))
+capture.start()
+while not capture.is_complete():
+    capture.add_frame(frame)          # once per camera frame
+sequence = capture.sequence()
+```
+
+### Supported vocabulary
+
+**hello, yes, no** — and `unknown`.
+
+That is the whole vocabulary, taken from `SIGNS` in `src/asl/__init__.py`. The
+prompt tells Gemini it may answer only with those, and the response schema
+constrains it with an enum. If a reply still names anything else, the
+recognizer converts it to `unknown` rather than passing an unsupported label
+on. Answers below the confidence threshold also become `unknown`: declining is
+treated as a correct outcome, not a failure.
+
+### Setup
+
+The work lives on the `Umar` branch:
+
+```
+git switch Umar
+```
+
+Install dependencies (adds `google-genai` to the existing set):
+
+```
+python -m pip install -r requirements.txt
+```
+
+Set your API key. Create one at
+[aistudio.google.com/apikey](https://aistudio.google.com/apikey).
+
+macOS:
+
+```bash
+export GEMINI_API_KEY='your-key-here'
+```
+
+Windows PowerShell:
+
+```powershell
+$env:GEMINI_API_KEY = 'your-key-here'
+```
+
+Both set the key for the current shell session only. To keep it across
+sessions, copy `.env.example` to `.env` and fill it in:
+
+```bash
+cp .env.example .env          # macOS
+Copy-Item .env.example .env   # Windows PowerShell
+```
+
+Note that nothing loads `.env` automatically yet — the recognizer reads the
+environment variable. Either export it as above or add a loader later.
+
+### Security
+
+The API key is read from the `GEMINI_API_KEY` environment variable and nothing
+else. It is never hardcoded, never written to a committed file, and never
+printed. When a Gemini request fails, the error reports only the exception
+*type*, because provider messages sometimes echo request details back.
+
+`.gitignore` excludes `.env` and any `.env.*`, with an explicit exception for
+`.env.example`, which is a template containing no real key. If a key is ever
+committed by accident, treat it as leaked and revoke it immediately — rewriting
+history is not enough, since the value may already be cached elsewhere.
+
+Be aware of what leaves the machine: this sends webcam frames to Google's API.
+Nothing is uploaded until `recognize_sequence` is called, and no frames are
+written to disk.
+
+### Current limitations
+
+- Three signs only, and no claim beyond them.
+- Not connected to a live application; no continuous or automatic requests.
+- Untested against the real API — every test to date uses a stub client.
+- No batching, retries, rate limiting, or cost controls.
+- Static, single-sign clips only; no continuous signing or sentence structure.

@@ -21,3 +21,10 @@ opencv-contrib-python>=4.8,<5
 scikit-learn>=1.3,<2
 joblib>=1.3
 
+# Milestone 3: Gemini multimodal ASL recognition over a frame sequence.
+# google-genai is the current unified Google AI SDK (`from google import genai`);
+# the older google-generativeai package is superseded. It installs cleanly
+# against the numpy<2 pin above.
+google-genai>=1.0,<3
+
+

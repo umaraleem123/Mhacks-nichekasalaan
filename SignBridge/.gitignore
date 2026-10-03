@@ -27,6 +27,8 @@ htmlcov/
 # Environment / secrets
 .env
 .env.*
+# The committed template holds no real key.
+!.env.example
 
 # IDE and editor files
 .vscode/
