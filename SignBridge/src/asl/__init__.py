@@ -31,13 +31,27 @@ SIGNS: list[str] = [
     "nice_to_meet_you",
 ]
 
-# Each group records a disjoint set of the new signs. Clips land in
-# data/sequences/<sign>/, so the three collection branches merge by adding
-# different folders and do not conflict.
+# The first ten signs. collect/original records and trains only these.
+ORIGINAL_SIGNS: list[str] = [
+    "bad",
+    "good",
+    "hello",
+    "help",
+    "how_are_you",
+    "no",
+    "please",
+    "sorry",
+    "thank_you",
+    "yes",
+]
+
+# Each numbered group records a disjoint set of the newer signs. Clips land in
+# data/sequences/<sign>/, so those branches merge by adding different folders.
 COLLECTION_GROUPS: dict[str, list[str]] = {
     "1": ["i_me", "you", "name", "goodbye"],
     "2": ["want", "need", "what"],
     "3": ["understand", "dont_understand", "where", "nice_to_meet_you"],
+    "original": list(ORIGINAL_SIGNS),
 }
 
 
