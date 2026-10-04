@@ -19,6 +19,16 @@ PHRASE_BY_LABEL: dict[str, str] = {
     "good": "Good",
     "bad": "Bad",
     "how_are_you": "How are you?",
+    "i_me": "I",
+    "you": "You",
+    "want": "Want",
+    "need": "Need",
+    "understand": "Understand",
+    "dont_understand": "Don't understand",
+    "what": "What",
+    "where": "Where",
+    "name": "Name",
+    "goodbye": "Goodbye",
 }
 
 

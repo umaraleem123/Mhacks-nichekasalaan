@@ -23,7 +23,7 @@ import cv2
 import numpy as np
 
 from src import SEQUENCE_DATA_DIR
-from src.asl import SIGNS, display_label
+from src.asl import collection_signs, display_label
 from src.asl.sequence_dataset import save_sequence
 from src.asl.sequence_features import frame_features, positions_from_hands
 from src.vision.camera import CAMERA_LOST_ERROR, open_camera
@@ -70,7 +70,7 @@ class SequenceRecorder:
     min_frames: int = MIN_FRAMES
     clock: Callable[[], float] = time.perf_counter
     recording: bool = False
-    sign: str = field(default_factory=lambda: SIGNS[0])
+    sign: str = ""
     frames: list[np.ndarray] = field(default_factory=list)
     last_message: str = ""
     last_saved: Path | None = None
@@ -132,6 +132,17 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--target", type=int, default=DEFAULT_TARGET)
     parser.add_argument("--max-seconds", type=float, default=None)
     parser.add_argument("--camera", type=int, default=None)
+    parser.add_argument(
+        "--group",
+        choices=("1", "2", "3"),
+        default=None,
+        help="Record only this person's signs (see COLLECTION_GROUPS).",
+    )
+    parser.add_argument(
+        "--signs",
+        default=None,
+        help="Comma-separated labels to record instead of --group.",
+    )
     return parser.parse_args(argv)
 
 
@@ -220,9 +231,14 @@ def run_loop(
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
+    try:
+        signs = collection_signs(args.group, args.signs)
+    except ValueError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
     max_seconds = args.max_seconds if args.max_seconds is not None else sequence_seconds()
     data_dir = Path(args.data_dir)
-    for sign in SIGNS:
+    for sign in signs:
         (data_dir / sign).mkdir(parents=True, exist_ok=True)
 
     opened = open_camera(args.camera)
@@ -230,13 +246,14 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     camera, camera_name = opened
     print(f"Camera: {camera_name}")
+    print(f"Signs: {', '.join(signs)}")
     print(f"Saving sequences under {data_dir}")
     print(f"Max clip length: {max_seconds:.1f}s   target ~{args.target} per sign")
 
     recorder = SequenceRecorder(data_dir=data_dir, max_seconds=max_seconds)
     try:
         with HandTracker() as tracker:
-            return run_loop(camera, tracker, recorder, SIGNS, args.target)
+            return run_loop(camera, tracker, recorder, signs, args.target)
     except HandTrackerError as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1

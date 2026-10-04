@@ -18,6 +18,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from src.asl import collection_signs
 from src.asl.phrase_mapper import format_sentence, label_to_english
 from src.asl.sequence_data_collector import SequenceRecorder
 from src.asl.sequence_dataset import (
@@ -387,6 +388,34 @@ class CollectorAndPhraseTests(unittest.TestCase):
         self.assertEqual(label_to_english("HELLO"), "Hello")
         self.assertEqual(label_to_english("thank_you"), "Thank you")
         self.assertEqual(label_to_english("HOW_ARE_YOU"), "How are you?")
+        self.assertEqual(label_to_english("dont_understand"), "Don't understand")
+        self.assertEqual(label_to_english("I_ME"), "I")
+
+    def test_collection_groups_do_not_overlap(self) -> None:
+        groups = [collection_signs(group=str(index)) for index in (1, 2, 3)]
+        flat = [sign for group in groups for sign in group]
+        self.assertEqual(len(flat), len(set(flat)))
+        self.assertEqual(
+            set(flat),
+            {
+                "i_me",
+                "you",
+                "want",
+                "need",
+                "understand",
+                "dont_understand",
+                "what",
+                "where",
+                "name",
+                "goodbye",
+            },
+        )
+        self.assertEqual(
+            collection_signs(signs="Don't Understand, what"),
+            ["dont_understand", "what"],
+        )
+        with self.assertRaises(ValueError):
+            collection_signs(group="1", signs="you")
         self.assertEqual(
             format_sentence(["hello", "how_are_you"]),
             "Hello, how are you?",

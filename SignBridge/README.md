@@ -16,7 +16,8 @@ webcam → MediaPipe Hands → temporal landmark sequence
 Live vocabulary:
 
 `HELLO`, `YES`, `NO`, `THANK_YOU`, `PLEASE`, `HELP`, `SORRY`, `GOOD`, `BAD`,
-`HOW_ARE_YOU`
+`HOW_ARE_YOU`, `I_ME`, `YOU`, `WANT`, `NEED`, `UNDERSTAND`, `DONT_UNDERSTAND`,
+`WHAT`, `WHERE`, `NAME`, `GOODBYE`
 
 These are prototype labels, not a claim of full ASL translation.
 
@@ -81,6 +82,34 @@ not have to start the motion on the exact frame recording begins. Aim for
 about 20–30 complete motions per sign (200–300 total). Do not save individual
 webcam frames as the training set.
 
+## Collecting in parallel
+
+The new signs are split so three people can record at the same time. Each
+person uses their own branch and only saves clips for their signs. Those clips
+live in different `data/sequences/<sign>/` folders, so merging the branches
+back into `main` does not conflict.
+
+| Branch | Command | Signs |
+| --- | --- | --- |
+| `collect/group-1` | `--group 1` | `i_me`, `you`, `name`, `goodbye` |
+| `collect/group-2` | `--group 2` | `want`, `need`, `what` |
+| `collect/group-3` | `--group 3` | `understand`, `dont_understand`, `where` |
+
+`i_me` is the single point-to-self sign (I / me). `understand` and
+`dont_understand` stay with the same person because they are easy to confuse.
+
+```bash
+git checkout collect/group-1
+python -m src.asl.sequence_data_collector --group 1
+```
+
+Commit only the new `.npz` files under your sign folders. Do not commit
+`models/`. After all three branches are merged into `main`, train once:
+
+```bash
+python -m src.asl.train_sequence_model
+```
+
 ## Training
 
 ```bash
@@ -103,7 +132,8 @@ Writes (gitignored):
 - `models/asl_sequence_labels.json`
 
 Architecture: 252 features/frame → 2-layer BiGRU (hidden 128, bidirectional)
-→ masked temporal attention → dropout → 10-class head. Runs on laptop CPU.
+→ masked temporal attention → dropout → one output per sign that has clips.
+Runs on laptop CPU.
 
 ## Live demo
 
