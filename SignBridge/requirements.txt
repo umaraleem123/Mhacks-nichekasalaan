@@ -27,3 +27,7 @@ elevenlabs>=2.50,<3
 # ElevenLabs TTS playback. Audio is fetched with urllib (stdlib); this plays
 # the PCM/WAV stream through PortAudio on macOS and Windows.
 sounddevice>=0.4,<0.6
+
+# Web front end. The browser owns the webcam and posts frames to a small Flask
+# server that reuses the tracker and (currently) the frame classifier.
+flask>=3,<4

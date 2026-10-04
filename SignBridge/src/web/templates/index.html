@@ -1,0 +1,196 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>SignBridge · MHacks 2026</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=Red+Hat+Display:wght@400;500;600;700;800&family=Red+Hat+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}">
+</head>
+<body>
+  <header class="hero">
+    <div class="hero-glow hero-glow-a"></div>
+    <div class="hero-glow hero-glow-b"></div>
+    <div class="hero-glow hero-glow-c"></div>
+
+    <nav class="nav">
+      <a class="brand" href="#">
+        <span class="logo" aria-hidden="true">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M18 11V6a2 2 0 0 0-4 0v5"/><path d="M14 10V4a2 2 0 0 0-4 0v6"/>
+            <path d="M10 10.5V6a2 2 0 0 0-4 0v8"/>
+            <path d="M18 8a2 2 0 1 1 4 0v6a8 8 0 0 1-8 8h-2c-2.8 0-4.5-.86-5.99-2.34l-3.6-3.6a2 2 0 0 1 2.83-2.82L7 15"/>
+          </svg>
+        </span>
+        <span class="wordmark">SignBridge</span>
+      </a>
+      <div class="nav-links">
+        <a href="#app">Studio</a>
+        <a href="#grow">How it grows</a>
+      </div>
+      <div class="nav-actions">
+        <div id="model-pill" class="pill pill-muted"><span class="dot"></span><span id="model-pill-text">Connecting…</span></div>
+        <a class="btn btn-maize btn-small" href="#app">Open studio</a>
+      </div>
+    </nav>
+
+    <div class="hero-body">
+      <span class="ornament ornament-a" aria-hidden="true">☘︎</span>
+      <span class="ornament ornament-b" aria-hidden="true">✿</span>
+      <span class="ornament ornament-c" aria-hidden="true">✦</span>
+      <span class="ornament ornament-d" aria-hidden="true">❀</span>
+
+      <p class="eyebrow">MHacks 2026 · Digital Garden</p>
+      <h1>SignBridge</h1>
+      <p class="tagline">Signs that grow into words.</p>
+      <p class="hero-copy">
+        Real-time American Sign Language recognition from your webcam.
+        Every frame stays on your own machine.
+      </p>
+      <div class="hero-ctas">
+        <button class="btn btn-maize btn-large" id="hero-start">Start signing <span aria-hidden="true">→</span></button>
+        <a class="btn btn-cream btn-large" href="#grow">How it grows</a>
+      </div>
+    </div>
+  </header>
+
+  <main class="garden">
+    <section class="studio" id="app">
+      <div class="section-head">
+        <p class="kicker">i. the studio</p>
+        <h2>Live studio <span class="glyph">☘︎ ݁˖</span></h2>
+        <svg class="squiggle" viewBox="0 0 300 14" preserveAspectRatio="none" aria-hidden="true">
+          <path d="M2 9 C 40 3, 70 13, 110 7 S 180 3, 220 8 S 280 12, 298 6" fill="none" stroke="currentColor" stroke-width="4" stroke-linecap="round"/>
+        </svg>
+      </div>
+
+      <div class="layout">
+        <section class="stage card">
+          <div class="video-wrap" id="video-wrap">
+            <video id="video" playsinline muted></video>
+            <canvas id="overlay"></canvas>
+
+            <div class="placeholder" id="placeholder">
+              <div class="placeholder-icon">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="m22 8-6 4 6 4V8Z"/><rect x="2" y="6" width="14" height="12" rx="2"/>
+                </svg>
+              </div>
+              <h3>Plant your camera</h3>
+              <p>Frames go only to the SignBridge server running on this machine.</p>
+              <button class="btn btn-maize" id="start-btn">Start camera</button>
+              <p class="error-text" id="camera-error"></p>
+            </div>
+
+            <div class="hud" id="hud" hidden>
+              <span class="hud-chip"><span class="live-dot"></span>LIVE</span>
+              <span class="hud-chip" id="hud-fps">0 FPS</span>
+              <span class="hud-chip" id="hud-hand">No hand</span>
+            </div>
+
+            <div class="sign-banner" id="sign-banner" hidden>
+              <span class="sign-banner-label">sign</span>
+              <span class="sign-banner-value" id="banner-sign">—</span>
+            </div>
+          </div>
+
+          <div class="stage-controls">
+            <label class="field">
+              <span>Camera</span>
+              <select id="camera-select" disabled><option>Default camera</option></select>
+            </label>
+            <button class="btn btn-outline" id="stop-btn" disabled>Stop</button>
+          </div>
+        </section>
+
+        <aside class="sidebar">
+          <section class="card prediction">
+            <div class="card-head">
+              <h3>Prediction</h3>
+              <span class="muted mono" id="latency">— ms</span>
+            </div>
+            <div class="big-sign idle" id="big-sign">Waiting</div>
+            <div class="meter"><div class="meter-fill" id="meter-fill"></div><div class="meter-mark" id="meter-mark"></div></div>
+            <div class="meter-labels"><span>Confidence</span><span id="confidence-text">0%</span></div>
+          </section>
+
+          <section class="card notice" id="no-model" hidden>
+            <h3>Nothing planted yet</h3>
+            <p>Hand tracking works, but there is no trained model to recognize against. From the <code>SignBridge</code> folder, run:</p>
+            <pre>python -m src.asl.data_collector
+python -m src.asl.train</pre>
+            <button class="btn btn-outline btn-small" id="reload-btn">Reload model</button>
+          </section>
+
+          <section class="card">
+            <div class="card-head"><h3>Vocabulary</h3><span class="muted mono" id="class-count"></span></div>
+            <div class="chips" id="chips"></div>
+          </section>
+
+          <section class="card">
+            <div class="card-head">
+              <h3>Transcript</h3>
+              <div class="row">
+                <label class="toggle" title="Read new signs aloud">
+                  <input type="checkbox" id="speak-toggle"><span class="toggle-track"></span><span>Speak</span>
+                </label>
+                <button class="btn btn-outline btn-small" id="clear-btn">Clear</button>
+              </div>
+            </div>
+            <div class="transcript" id="transcript"><span class="muted">Recognized signs will sprout here.</span></div>
+          </section>
+
+          <section class="card">
+            <div class="card-head"><h3>Sensitivity</h3><span class="muted mono" id="threshold-text"></span></div>
+            <input type="range" id="threshold" min="0.3" max="0.95" step="0.05">
+            <p class="hint">Below this confidence, a prediction shows as unknown instead of guessing.</p>
+          </section>
+        </aside>
+      </div>
+    </section>
+
+    <section class="grow" id="grow">
+      <div class="section-head">
+        <p class="kicker">ii. how it grows</p>
+        <h2>From seed to sentence <span class="glyph">✿</span></h2>
+        <svg class="squiggle" viewBox="0 0 300 14" preserveAspectRatio="none" aria-hidden="true">
+          <path d="M2 9 C 40 3, 70 13, 110 7 S 180 3, 220 8 S 280 12, 298 6" fill="none" stroke="currentColor" stroke-width="4" stroke-linecap="round"/>
+        </svg>
+      </div>
+
+      <div class="steps">
+        <article class="step">
+          <span class="step-num">i.</span>
+          <h3>Plant</h3>
+          <p>Your browser streams the webcam to a SignBridge server on your own machine. No cloud, no uploads.</p>
+          <span class="step-tag">capture</span>
+        </article>
+        <article class="step">
+          <span class="step-num">ii.</span>
+          <h3>Root</h3>
+          <p>MediaPipe finds 21 hand landmarks, then mirrors, centers, and scales them into a 63-value feature vector.</p>
+          <span class="step-tag">track</span>
+        </article>
+        <article class="step">
+          <span class="step-num">iii.</span>
+          <h3>Bloom</h3>
+          <p>A trained classifier names the sign with a confidence score, and your transcript grows as you sign.</p>
+          <span class="step-tag">recognize</span>
+        </article>
+      </div>
+    </section>
+  </main>
+
+  <footer class="footer">
+    <p class="footer-line">Build something that grows.</p>
+    <div class="footer-bar">
+      <span>SignBridge · Built at MHacks 2026 ☘︎</span>
+      <span>Ann Arbor, MI</span>
+    </div>
+  </footer>
+
+  <script src="{{ url_for('static', filename='app.js') }}"></script>
+</body>
+</html>
