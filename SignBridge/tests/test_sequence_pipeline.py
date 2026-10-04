@@ -390,6 +390,7 @@ class CollectorAndPhraseTests(unittest.TestCase):
         self.assertEqual(label_to_english("HOW_ARE_YOU"), "How are you?")
         self.assertEqual(label_to_english("dont_understand"), "Don't understand")
         self.assertEqual(label_to_english("I_ME"), "I")
+        self.assertEqual(label_to_english("nice_to_meet_you"), "Nice to meet you")
 
     def test_collection_groups_do_not_overlap(self) -> None:
         groups = [collection_signs(group=str(index)) for index in (1, 2, 3)]
@@ -408,6 +409,7 @@ class CollectorAndPhraseTests(unittest.TestCase):
                 "where",
                 "name",
                 "goodbye",
+                "nice_to_meet_you",
             },
         )
         self.assertEqual(

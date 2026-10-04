@@ -28,6 +28,7 @@ SIGNS: list[str] = [
     "where",
     "name",
     "goodbye",
+    "nice_to_meet_you",
 ]
 
 # Each group records a disjoint set of the new signs. Clips land in
@@ -36,7 +37,7 @@ SIGNS: list[str] = [
 COLLECTION_GROUPS: dict[str, list[str]] = {
     "1": ["i_me", "you", "name", "goodbye"],
     "2": ["want", "need", "what"],
-    "3": ["understand", "dont_understand", "where"],
+    "3": ["understand", "dont_understand", "where", "nice_to_meet_you"],
 }
 
 
