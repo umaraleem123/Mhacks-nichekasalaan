@@ -14,6 +14,9 @@ A `FrameSequence` is an ordered list of `CapturedFrame` objects, oldest first,
 each holding a BGR image and the seconds elapsed since the capture started.
 Ordering is the meaning here, so nothing reorders the list.
 
+`CaptureConfig()` holds one sign; `CaptureConfig.for_sentence()` holds a whole
+signed sentence, ended by the user or by a duration ceiling.
+
 Three things bound memory, all configurable through `CaptureConfig`:
 
 - `sample_fps` thins the incoming camera stream. A webcam delivers ~30 fps, far
@@ -26,6 +29,7 @@ Three things bound memory, all configurable through `CaptureConfig`:
 
 from __future__ import annotations
 
+import os
 import time
 from collections import deque
 from dataclasses import dataclass, field
@@ -34,13 +38,41 @@ from typing import Callable, Iterator
 import cv2
 import numpy as np
 
-# Tuned for an interactive demo: long enough to contain the movement of a
-# one-handed sign, short enough that the whole SPACE-to-answer round trip stays
-# in the few-seconds range. Nine frames still shows a trajectory; one would not.
+# Single-sign defaults: long enough to contain the movement of one sign, short
+# enough to stay interactive. Nine frames shows a trajectory; one would not.
 DEFAULT_DURATION_SECONDS = 1.5
 DEFAULT_SAMPLE_FPS = 6.0
 DEFAULT_MAX_FRAMES = 12
 DEFAULT_MAX_FRAME_WIDTH = 640
+
+# Sentence defaults: a short signed sentence, ended by the user or by the cap.
+# 3 fps over 6 seconds is ~18 frames. A 30 fps camera stream would be ~180.
+MAX_RECORDING_ENV = "SIGNBRIDGE_MAX_RECORDING_SECONDS"
+SENTENCE_MAX_SECONDS = 6.0
+SENTENCE_HARD_MAX_SECONDS = 15.0
+SENTENCE_SAMPLE_FPS = 3.0
+SENTENCE_MAX_FRAME_WIDTH = 512
+
+# Consecutive sampled frames whose 48x48 grayscale mean-abs difference is at
+# or below this (on a 0–255 scale) are treated as the same pose.
+DUPLICATE_MEAN_ABS = 4.0
+THUMB_SIZE = 48
+
+
+def env_float(name: str, default: float) -> float:
+    raw = (os.environ.get(name) or "").strip()
+    if not raw:
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        return default
+
+
+def sentence_max_seconds() -> float:
+    """Recording ceiling, from SIGNBRIDGE_MAX_RECORDING_SECONDS or 6s."""
+    value = env_float(MAX_RECORDING_ENV, SENTENCE_MAX_SECONDS)
+    return min(SENTENCE_HARD_MAX_SECONDS, max(1.0, value))
 
 
 class SequenceCaptureError(ValueError):
@@ -67,6 +99,33 @@ class CaptureConfig:
             )
         if self.max_frame_width <= 0:
             raise SequenceCaptureError("max_frame_width must be positive.")
+
+    @classmethod
+    def for_sentence(
+        cls,
+        max_seconds: float | None = None,
+        sample_fps: float = SENTENCE_SAMPLE_FPS,
+        max_frame_width: int = SENTENCE_MAX_FRAME_WIDTH,
+    ) -> CaptureConfig:
+        """Config for recording a whole signed sentence.
+
+        `max_seconds` is a ceiling, not a target: the user normally ends the
+        sentence early by pressing SPACE again. When omitted, the value comes
+        from SIGNBRIDGE_MAX_RECORDING_SECONDS (default 6).
+        """
+        if max_seconds is None:
+            max_seconds = sentence_max_seconds()
+        if max_seconds > SENTENCE_HARD_MAX_SECONDS:
+            raise SequenceCaptureError(
+                f"max_seconds cannot exceed {SENTENCE_HARD_MAX_SECONDS:g}."
+            )
+        frames = int(round(max_seconds * sample_fps))
+        return cls(
+            duration_seconds=max_seconds,
+            sample_fps=sample_fps,
+            max_frames=max(4, frames + max(2, frames // 5)),
+            max_frame_width=max_frame_width,
+        )
 
     @property
     def sample_interval(self) -> float:
@@ -121,6 +180,53 @@ class FrameSequence:
         return len(self.frames) >= 2
 
 
+@dataclass(frozen=True)
+class CaptureStats:
+    """Counts printed after SPACE stops a sentence."""
+
+    captured_seconds: float = 0.0
+    frames_before_optimization: int = 0
+    frames_after_sampling: int = 0
+    frames_after_deduplication: int = 0
+
+
+def _gray_thumb(image: np.ndarray, size: int = THUMB_SIZE) -> np.ndarray:
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY) if image.ndim == 3 else image
+    return cv2.resize(gray, (size, size), interpolation=cv2.INTER_AREA)
+
+
+def frames_are_near_duplicates(
+    first: np.ndarray,
+    second: np.ndarray,
+    max_mean_abs: float = DUPLICATE_MEAN_ABS,
+) -> bool:
+    """True when two frames are visually almost the same pose."""
+    thumb_a = _gray_thumb(first).astype(np.float32)
+    thumb_b = _gray_thumb(second).astype(np.float32)
+    return float(np.mean(np.abs(thumb_a - thumb_b))) <= max_mean_abs
+
+
+def deduplicate_sequence(
+    sequence: FrameSequence, max_mean_abs: float = DUPLICATE_MEAN_ABS
+) -> FrameSequence:
+    """Drop consecutive near-duplicates, keeping chronological order.
+
+    The first frame is always kept. Later frames are kept only when they
+    differ from the last kept frame, so idle holds do not pad the request.
+    """
+    frames = list(sequence.frames)
+    if len(frames) <= 2:
+        return sequence
+
+    kept = [frames[0]]
+    for frame in frames[1:]:
+        if not frames_are_near_duplicates(kept[-1].image, frame.image, max_mean_abs):
+            kept.append(frame)
+    if len(kept) < 2:
+        kept.append(frames[-1])
+    return FrameSequence(kept)
+
+
 class SequenceCapture:
     """A rolling, rate-limited buffer of recent frames.
 
@@ -144,6 +250,8 @@ class SequenceCapture:
         self._frames: deque[CapturedFrame] = deque(maxlen=self.config.max_frames)
         self._started_at: float | None = None
         self._last_stored_at: float | None = None
+        self._offered: int = 0
+        self.last_stats = CaptureStats()
 
     @property
     def is_running(self) -> bool:
@@ -173,12 +281,29 @@ class SequenceCapture:
         self._frames.clear()
         self._started_at = self._clock()
         self._last_stored_at = None
+        self._offered = 0
 
     def reset(self) -> None:
         """Stop and clear the buffer."""
         self._frames.clear()
         self._started_at = None
         self._last_stored_at = None
+        self._offered = 0
+
+    def stop(self) -> FrameSequence:
+        """End the capture, drop near-duplicates, and return the sequence."""
+        sampled = self.sequence()
+        elapsed = self.elapsed
+        offered = self._offered
+        optimized = deduplicate_sequence(sampled)
+        self.last_stats = CaptureStats(
+            captured_seconds=elapsed,
+            frames_before_optimization=offered,
+            frames_after_sampling=len(sampled),
+            frames_after_deduplication=len(optimized),
+        )
+        self.reset()
+        return optimized
 
     def add_frame(self, frame: np.ndarray) -> bool:
         """Offer a frame. Returns True if it was stored.
@@ -191,6 +316,7 @@ class SequenceCapture:
         if frame is None or getattr(frame, "size", 0) == 0:
             raise SequenceCaptureError("Cannot store an empty frame.")
 
+        self._offered += 1
         now = self._clock()
         if (
             self._last_stored_at is not None

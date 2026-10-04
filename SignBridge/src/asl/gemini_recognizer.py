@@ -1,16 +1,22 @@
-"""Recognize an ASL sign from a short frame sequence using Gemini.
+"""UNUSED / EXPERIMENTAL — not part of the live SignBridge demo.
 
-Uses the Interactions API (`client.interactions.create`) of the google-genai
-SDK with Gemini 3.8 Flash. All Gemini access is confined to this module so the
-rest of SignBridge stays unaware of the API.
+Kept for reference. The live path does not call Gemini.
 
-The input is a `FrameSequence` from `sequence_capture`, never a single frame,
-because an ASL sign is defined partly by movement. The whole ordered sequence
-goes out as one interaction: a flat list of content items alternating a text
-label and the JPEG for each frame, so the chronology is explicit.
+Translate a signed ASL sentence into English using Gemini.
+
+Uses the standard generateContent API (`client.models.generate_content`) of
+the google-genai SDK. That call is synchronous: one HTTP request, one
+response, no interaction polling. All Gemini access is confined to this
+module so the rest of SignBridge stays unaware of the API.
+
+The input is a `FrameSequence` from `sequence_capture` covering a complete
+signing event: a small chronological list of JPEG frames, never a single
+frame and never a full-rate video. ASL grammar lives in movement, so the
+whole sampled sequence goes out as one request and comes back as one
+English sentence.
 
 Nothing here runs at import time, and no network call happens until
-`recognize_sequence` is called. The API key is read from the environment and is
+`translate_sequence` is called. The API key is read from the environment and is
 never logged or included in an error message.
 """
 
@@ -20,19 +26,21 @@ import base64
 import json
 import os
 import re
+import sys
 import tempfile
-from dataclasses import dataclass
+import time
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import cv2
 import numpy as np
 
-from src.asl import SIGNS
 from src.asl.sequence_capture import FrameSequence
 
 API_KEY_ENV_VAR = "GEMINI_API_KEY"
-DEFAULT_MODEL = "gemini-3.8-flash"
+TIMEOUT_ENV = "SIGNBRIDGE_GEMINI_TIMEOUT_SECONDS"
+DEFAULT_MODEL = "gemini-3.7-flash"
 JPEG_MIME_TYPE = "image/jpeg"
 VIDEO_MIME_TYPE = "video/mp4"
 RESPONSE_MIME_TYPE = "application/json"
@@ -40,93 +48,86 @@ RESPONSE_MIME_TYPE = "application/json"
 # Latency settings. A hackathon demo needs an answer in a few seconds, so
 # reasoning depth is traded away deliberately.
 DEFAULT_THINKING_LEVEL = "low"
-DEFAULT_MAX_OUTPUT_TOKENS = 200
-DEFAULT_REQUEST_TIMEOUT_SECONDS = 20.0
+DEFAULT_MAX_OUTPUT_TOKENS = 512
+DEFAULT_REQUEST_TIMEOUT_SECONDS = 22.0
+DEFAULT_POLL_INTERVAL_SECONDS = 0.75
+
+# Official Interaction.status values from google-genai 2.28.
+_NON_TERMINAL_STATUSES = frozenset({"queued", "in_progress"})
+_TERMINAL_FAILURE_STATUSES = frozenset(
+    {"failed", "cancelled", "budget_exceeded", "requires_action"}
+)
+_COMPLETED_STATUS = "completed"
+_INCOMPLETE_STATUS = "incomplete"
 
 # H.264 first for the smallest payload, MPEG-4 Part 2 as the portable
 # fallback. Both were confirmed to encode through OpenCV's ffmpeg build.
 VIDEO_CODECS: tuple[str, ...] = ("avc1", "mp4v")
 MIN_VIDEO_FPS = 2.0
 
-# Interaction statuses that mean no usable answer came back.
-_FAILED_STATUSES = frozenset(
-    {"failed", "cancelled", "budget_exceeded", "incomplete", "requires_action"}
-)
-DEFAULT_JPEG_QUALITY = 80
+DEFAULT_JPEG_QUALITY = 70
 DEFAULT_CONFIDENCE_THRESHOLD = 0.6
 
-UNKNOWN_SIGN = "unknown"
+SYSTEM_PROMPT = """\
+You are interpreting a short temporal sequence of images showing American Sign
+Language. Analyze the sequence as a whole. Do not interpret each frame
+independently. Use the hand movements across time to infer the intended ASL
+message.
 
-# What Gemini is allowed to answer: the MVP vocabulary, plus a way to decline.
-SUPPORTED_SIGNS: tuple[str, ...] = tuple(SIGNS)
-ALLOWED_ANSWERS: tuple[str, ...] = SUPPORTED_SIGNS + (UNKNOWN_SIGN,)
+ASL is a complete natural language. Do not map one frame to one English word.
+Translate the meaning of the whole utterance into one natural English sentence.
 
-SYSTEM_PROMPT = f"""\
-You recognize American Sign Language (ASL) signs for an assistive tool. ASL is
-a real language, not a set of static poses. Accuracy matters more than
-answering.
+If the sequence is too ambiguous, set recognized to false and leave
+english_translation empty.
 
-INPUT: a short clip of ONE signing event, about 1-2 seconds, given either as a
-video or as frames in chronological order. Interpret it temporally.
+Return ONLY this JSON object, with double quotes, no markdown, no explanation:
 
-The change between frames is the evidence. Movement is often the only thing
-separating two signs, so never classify from a single frame: a frame is one
-slice through a motion, and unrelated signs pass through identical handshapes
-at different instants. The hand's location, orientation, and configuration can
-all change mid-sign, and a mid-sign pose may be only a transition. Judge the
-whole clip.
+{"recognized": true, "english_translation": "Hello, how are you?", "confidence": 0.93, "notes": ""}
 
-Weigh all five parameters: handshape, palm orientation, location, movement
-(path, direction, repetition), and any visible non-manual signals. One or both
-hands may be involved; do not assume one-handed just because a frame shows one.
-
-VOCABULARY. Answer only with: {", ".join(SUPPORTED_SIGNS)}, or "unknown".
-This is a limited-vocabulary prototype, not full ASL translation.
-- "hello": flat hand at forehead or temple, moving outward and away.
-- "yes": fist, palm forward, bobbing at the wrist like a nod.
-- "no": index and middle fingers snap down onto the thumb, once and quickly.
-
-ANSWER "unknown" whenever evidence is insufficient: a sign outside the
-vocabulary, a hand moving into or out of position, a still or resting hand,
-blur or occlusion hiding a parameter, motion fitting more than one sign, or no
-hand visible. "unknown" is a correct answer and is preferred over a guess.
-Never invent a sign, and never pick the nearest supported one for a gesture
-that is not in the list.
-
-CONFIDENCE: your genuine probability from 0.0 to 1.0. Keep it low when the
-evidence is thin.
-
-OUTPUT: the JSON object only. No reasoning, no step-by-step explanation, no
-prose outside the fields. Keep `description` to at most one short clause naming
-the movement you saw, or omit it.
+confidence must be a JSON number from 0.0 to 1.0, written like 0.93 — never
+.0.93, 0.93.0, or a string. notes is a short clause or "".
 """
 
-# Matches the SignInterpretation fields below.
+# Matches the SentenceTranslation fields below.
 RESPONSE_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
         "recognized": {
             "type": "boolean",
-            "description": "True only if a supported sign was identified.",
+            "description": "True only if the signing could be translated.",
         },
-        "sign": {
+        "english_translation": {
             "type": "string",
-            "enum": list(ALLOWED_ANSWERS),
-            "description": "The sign, or 'unknown' when evidence is insufficient.",
+            "description": "One natural English sentence, or empty if not recognized.",
         },
         "confidence": {
             "type": "number",
-            "description": "Probability from 0.0 to 1.0 that the sign is correct.",
+            "minimum": 0,
+            "maximum": 1,
+            "description": (
+                "JSON number from 0.0 to 1.0 inclusive. Example: 0.93. "
+                "Never .0.93, 0.93.0, a percentage, or a string."
+            ),
         },
-        "description": {
+        "notes": {
             "type": "string",
-            "description": "Optional. At most one short clause; may be omitted.",
+            "description": "Optional. One short clause, or an empty string.",
         },
     },
-    # `description` is deliberately not required: the recognition result does
-    # not depend on it, and demanding prose costs output tokens and latency.
-    "required": ["recognized", "sign", "confidence"],
+    "required": ["recognized", "english_translation", "confidence", "notes"],
 }
+
+# Preview of model text printed to the terminal. Never includes the API key.
+MAX_RAW_PREVIEW = 400
+_FENCE_BLOCK = re.compile(
+    r"^```(?:json|JSON)?\s*\r?\n?(.*?)\r?\n?```\s*$",
+    re.DOTALL,
+)
+_CONFIDENCE_FIELD = re.compile(
+    r'("confidence"\s*:\s*)([^\n,}]*)',
+    re.IGNORECASE,
+)
+_NUMBER_PIECE = re.compile(r"\d+(?:\.\d+)?|\.\d+")
 
 
 REDACTED = "***REDACTED***"
@@ -176,6 +177,10 @@ class GeminiRecognizerError(RuntimeError):
     """Gemini could not be configured or did not return a usable answer."""
 
 
+class GeminiJsonError(GeminiRecognizerError):
+    """The model text could not be turned into a JSON object."""
+
+
 class GeminiRequestError(GeminiRecognizerError):
     """A Gemini request failed, with safe diagnostics attached.
 
@@ -185,7 +190,8 @@ class GeminiRequestError(GeminiRecognizerError):
     """
 
     BUSY_MESSAGE = "Gemini is currently busy. Please try again."
-    TIMEOUT_MESSAGE = "Gemini request timed out."
+    TIMEOUT_MESSAGE = "Gemini timed out."
+    INTERACTION_TIMEOUT_MESSAGE = "Gemini timed out."
 
     # 429 too many requests, 503 unavailable: the service is overloaded.
     BUSY_STATUS_CODES = frozenset({429, 503})
@@ -215,11 +221,13 @@ class GeminiRequestError(GeminiRecognizerError):
     def is_timeout(self) -> bool:
         if self.status_code in (408, 504):
             return True
-        return "timeout" in self.error_type.lower()
+        return "timeout" in self.error_type.lower() or self.error_type == "InteractionTimeout"
 
     @property
     def user_message(self) -> str:
         """What the window shows: plain, actionable, no provider text."""
+        if self.error_type == "InteractionTimeout":
+            return self.INTERACTION_TIMEOUT_MESSAGE
         if self.is_timeout:
             return self.TIMEOUT_MESSAGE
         if self.is_busy:
@@ -281,12 +289,13 @@ class GeminiConfig:
     temperature: float = 0.0  # recognition should be repeatable, not creative
     jpeg_quality: int = DEFAULT_JPEG_QUALITY
     confidence_threshold: float = DEFAULT_CONFIDENCE_THRESHOLD
-    request_timeout_seconds: float = DEFAULT_REQUEST_TIMEOUT_SECONDS
+    request_timeout_seconds: float = field(default_factory=lambda: gemini_timeout_seconds())
+    poll_interval_seconds: float = DEFAULT_POLL_INTERVAL_SECONDS
 
     # Latency levers.
     thinking_level: str = DEFAULT_THINKING_LEVEL
     max_output_tokens: int | None = DEFAULT_MAX_OUTPUT_TOKENS
-    send_as_video: bool = True
+    send_as_video: bool = False
     media_resolution: str | None = None  # None lets the API choose
 
     # 1 means a single attempt. The SDK never retries unless retry options are
@@ -296,23 +305,46 @@ class GeminiConfig:
 
 
 @dataclass(frozen=True)
-class SignInterpretation:
-    """A structured answer from Gemini."""
+class SentenceTranslation:
+    """A structured English translation of one signed sentence."""
 
     recognized: bool
-    sign: str
+    english_translation: str
     confidence: float
-    description: str
+    notes: str = ""
     frame_count: int = 0
     raw: dict[str, Any] | None = None
 
     @property
     def is_unknown(self) -> bool:
-        return not self.recognized or self.sign == UNKNOWN_SIGN
+        """True when there is no translation worth showing or speaking."""
+        return not self.recognized or not self.english_translation.strip()
+
+    @property
+    def speakable_text(self) -> str:
+        """Only the sentence. Never confidence, notes, or debug output."""
+        return "" if self.is_unknown else self.english_translation.strip()
 
     @classmethod
-    def unknown(cls, description: str, frame_count: int = 0) -> SignInterpretation:
-        return cls(False, UNKNOWN_SIGN, 0.0, description, frame_count)
+    def unknown(
+        cls,
+        notes: str,
+        frame_count: int = 0,
+        raw: dict[str, Any] | None = None,
+    ) -> SentenceTranslation:
+        return cls(False, "", 0.0, notes, frame_count, raw)
+
+
+def gemini_timeout_seconds() -> float:
+    """Hard request timeout, from SIGNBRIDGE_GEMINI_TIMEOUT_SECONDS or 22s."""
+    raw = (os.environ.get(TIMEOUT_ENV) or "").strip()
+    if not raw:
+        return DEFAULT_REQUEST_TIMEOUT_SECONDS
+    try:
+        value = float(raw)
+    except ValueError:
+        return DEFAULT_REQUEST_TIMEOUT_SECONDS
+    return min(60.0, max(5.0, value))
 
 
 def api_key_from_env(env_var: str = API_KEY_ENV_VAR) -> str:
@@ -344,6 +376,288 @@ def interaction_output_text(interaction: Any) -> str:
             if getattr(item, "type", None) == "text" and getattr(item, "text", None):
                 chunks.append(str(item.text))
     return "".join(chunks)
+
+
+def preview_model_text(
+    text: Any, extra_secrets: tuple[str, ...] = (), limit: int = MAX_RAW_PREVIEW
+) -> str:
+    """Redacted, truncated model text, safe to print."""
+    cleaned = redact_secrets(text, extra_secrets).replace("\r\n", "\n")
+    if len(cleaned) > limit:
+        return cleaned[:limit] + " ...(truncated)"
+    return cleaned
+
+
+def _strip_fences(text: str) -> str:
+    stripped = text.strip()
+    fenced = _FENCE_BLOCK.match(stripped)
+    if fenced:
+        return fenced.group(1).strip()
+    if stripped.startswith("```"):
+        stripped = re.sub(r"^```(?:json|JSON)?\s*", "", stripped)
+        stripped = re.sub(r"\s*```$", "", stripped)
+    return stripped.strip()
+
+
+def _extract_json_object(text: str) -> str | None:
+    """Return the first brace-balanced object, or None if there is no '{'."""
+    start = text.find("{")
+    if start < 0:
+        return None
+    depth = 0
+    in_string = False
+    escape = False
+    for index, char in enumerate(text[start:], start):
+        if in_string:
+            if escape:
+                escape = False
+            elif char == "\\":
+                escape = True
+            elif char == '"':
+                in_string = False
+            continue
+        if char == '"':
+            in_string = True
+        elif char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                return text[start : index + 1]
+    return text[start:]
+
+
+def _confidence_from_token(token: str) -> float | None:
+    """Pull a 0–1 probability out of a messy confidence token."""
+    pieces = _NUMBER_PIECE.findall(token or "")
+    if not pieces:
+        return None
+    values: list[float] = []
+    for piece in pieces:
+        try:
+            values.append(float(piece))
+        except ValueError:
+            continue
+    if not values:
+        return None
+    in_unit = [value for value in values if 0.0 <= value <= 1.0]
+    if in_unit:
+        # Prefer a real fraction over a lone 0 created by a leading ".0.93".
+        nonzero = [value for value in in_unit if value > 0.0]
+        return nonzero[-1] if nonzero else in_unit[0]
+    value = values[0]
+    if 1.0 < value <= 100.0:
+        return value / 100.0
+    return min(1.0, max(0.0, value))
+
+
+def _repair_confidence_field(text: str) -> str:
+    """Fix the known malformed confidence spellings before json.loads."""
+
+    def replace(match: re.Match[str]) -> str:
+        prefix, raw = match.group(1), match.group(2)
+        value = _confidence_from_token(raw)
+        if value is None:
+            return match.group(0)
+        return f"{prefix}{json.dumps(value)}"
+
+    return _CONFIDENCE_FIELD.sub(replace, text, count=1)
+
+
+def _coerce_bool(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in {"true", "yes", "1"}
+    if isinstance(value, (int, float)):
+        return value != 0
+    return False
+
+
+def _normalize_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    translation = payload.get("english_translation", "")
+    if translation is None:
+        translation = ""
+    notes = payload.get("notes", "")
+    if notes is None:
+        notes = ""
+    confidence = payload.get("confidence", 0.0)
+    if isinstance(confidence, str):
+        parsed = _confidence_from_token(confidence)
+        confidence = 0.0 if parsed is None else parsed
+    else:
+        try:
+            confidence = float(confidence)
+        except (TypeError, ValueError):
+            confidence = 0.0
+    return {
+        "recognized": _coerce_bool(payload.get("recognized", False)),
+        "english_translation": str(translation).strip(),
+        "confidence": min(1.0, max(0.0, float(confidence))),
+        "notes": str(notes).strip(),
+    }
+
+
+def parse_gemini_json(raw_text: object) -> dict[str, Any]:
+    """Turn model text into a normalized sentence payload.
+
+    Accepts a bare object, markdown fences, or surrounding prose. Repairs the
+    confidence spellings Gemini has been emitting (`.0.93`, `0.93.0`).
+    Never uses eval.
+    """
+    if raw_text is None:
+        raise GeminiJsonError("Gemini returned an empty response.")
+    text = _strip_fences(str(raw_text))
+    if not text.strip():
+        raise GeminiJsonError("Gemini returned an empty response.")
+
+    candidate = _extract_json_object(text) or text
+    attempts = (candidate, _repair_confidence_field(candidate))
+    last_error = "Gemini did not return valid JSON."
+    for attempt in attempts:
+        try:
+            payload = json.loads(attempt)
+        except json.JSONDecodeError as exc:
+            last_error = f"Gemini did not return valid JSON: {exc.msg}"
+            continue
+        if not isinstance(payload, dict):
+            raise GeminiJsonError(
+                f"Expected a JSON object from Gemini, got {type(payload).__name__}."
+            )
+        return _normalize_payload(payload)
+    raise GeminiJsonError(last_error)
+
+
+def structured_response_format() -> Any:
+    """SDK object that asks the Interactions API for schema-constrained JSON."""
+    from google.genai import interactions
+
+    return interactions.TextResponseFormat(
+        type="text",
+        mime_type=RESPONSE_MIME_TYPE,
+        schema_=RESPONSE_SCHEMA,
+    )
+
+
+def interaction_status(interaction: Any) -> str:
+    raw = getattr(interaction, "status", None)
+    return str(raw).strip().lower() if raw is not None else ""
+
+
+def interaction_diagnostics(
+    interaction: Any, extra_secrets: tuple[str, ...] = ()
+) -> str:
+    """Safe local dump of why an interaction is not completed.
+
+    Never includes credentials, request headers, or raw URLs.
+    """
+    status = interaction_status(interaction) or "(none)"
+    if status in _NON_TERMINAL_STATUSES:
+        lifecycle = "still processing (non-terminal)"
+    elif status == _COMPLETED_STATUS:
+        lifecycle = "terminated (completed)"
+    elif status == _INCOMPLETE_STATUS:
+        lifecycle = "terminated with incomplete results"
+    elif status in _TERMINAL_FAILURE_STATUSES:
+        lifecycle = "terminated (failure)"
+    else:
+        lifecycle = "unknown"
+
+    lines = [
+        "Gemini interaction diagnostics",
+        f"Interaction id: {getattr(interaction, 'id', None) or '(none)'}",
+        f"Status: {status}",
+        f"Lifecycle: {lifecycle}",
+        (
+            "Continuation token: present"
+            if getattr(interaction, "continuation_token", None)
+            else "Continuation token: absent"
+        ),
+    ]
+
+    errors = getattr(interaction, "errors", None) or []
+    lines.append(f"Error field: {'yes' if errors else 'no'}")
+    for err in errors:
+        code = getattr(err, "code", "") or ""
+        message = redact_secrets(getattr(err, "message", None) or err, extra_secrets)
+        lines.append(f"Error: {code} {message}".strip())
+
+    usage = getattr(interaction, "usage", None)
+    if usage is not None:
+        lines.append(
+            "Usage:"
+            f" input={getattr(usage, 'total_input_tokens', None)}"
+            f" output={getattr(usage, 'total_output_tokens', None)}"
+            f" thought={getattr(usage, 'total_thought_tokens', None)}"
+            f" total={getattr(usage, 'total_tokens', None)}"
+        )
+    else:
+        lines.append("Usage: (none)")
+
+    steps = getattr(interaction, "steps", None) or []
+    step_types = [str(getattr(step, "type", type(step).__name__)) for step in steps]
+    lines.append(f"Step types: {', '.join(step_types) if step_types else '(none)'}")
+
+    output_types: list[str] = []
+    for step in steps:
+        if getattr(step, "type", None) != "model_output":
+            continue
+        step_error = getattr(step, "error", None)
+        if step_error is not None:
+            lines.append(
+                "Model output error: "
+                + redact_secrets(
+                    getattr(step_error, "message", None) or step_error,
+                    extra_secrets,
+                )
+            )
+        for item in getattr(step, "content", None) or []:
+            output_types.append(str(getattr(item, "type", type(item).__name__)))
+    lines.append(
+        f"Output item types: {', '.join(output_types) if output_types else '(none)'}"
+    )
+    lines.append(
+        f"Output text characters: {len(interaction_output_text(interaction))}"
+    )
+    return "\n".join(lines)
+
+
+def incomplete_reason(
+    interaction: Any,
+    max_output_tokens: int | None,
+    extra_secrets: tuple[str, ...] = (),
+) -> str:
+    """Explain an `incomplete` status from fields the SDK actually exposes."""
+    errors = getattr(interaction, "errors", None) or []
+    if errors:
+        parts = [
+            redact_secrets(getattr(err, "message", None) or err, extra_secrets)
+            for err in errors
+        ]
+        return "; ".join(part for part in parts if part)
+
+    usage = getattr(interaction, "usage", None)
+    output = getattr(usage, "total_output_tokens", None) if usage is not None else None
+    thought = getattr(usage, "total_thought_tokens", None) if usage is not None else None
+    billed = 0
+    if isinstance(output, int):
+        billed += output
+    if isinstance(thought, int):
+        billed += thought
+    if max_output_tokens and billed >= max_output_tokens:
+        return (
+            f"Generation stopped at max_output_tokens={max_output_tokens} "
+            f"(output={output}, thought={thought})."
+        )
+    if getattr(interaction, "continuation_token", None):
+        return (
+            "Decode stopped early; a continuation token is present. "
+            "This usually means the output token budget was reached."
+        )
+    return (
+        "The interaction finished with status incomplete "
+        "(officially: completed but incomplete results, e.g. hitting max_tokens)."
+    )
 
 
 def sequence_fps(sequence: FrameSequence) -> float:
@@ -423,14 +737,18 @@ class GeminiSignRecognizer:
         api_key: str | None = None,
         config: GeminiConfig | None = None,
         client: Any | None = None,
+        clock: Callable[[], float] | None = None,
+        sleeper: Callable[[float], None] | None = None,
     ) -> None:
         self.config = config or GeminiConfig()
         self._client = client
         self._api_key = api_key
+        self._clock = clock or time.monotonic
+        self._sleep = sleeper or time.sleep
 
     @property
-    def supported_signs(self) -> tuple[str, ...]:
-        return SUPPORTED_SIGNS
+    def model(self) -> str:
+        return self.config.model
 
     def _ensure_client(self) -> Any:
         if self._client is not None:
@@ -450,88 +768,217 @@ class GeminiSignRecognizer:
         )
         return self._client
 
-    def _http_options(self) -> Any | None:
-        """Retry policy, or None to keep the SDK default of no retries.
-
-        The SDK retries nothing unless retry options are supplied, so leaving
-        this at None means one SPACE press is exactly one HTTP attempt. Raising
-        `retry_attempts` opts into the SDK's own exponential backoff rather
-        than adding a second retry loop here.
-        """
-        if self.config.retry_attempts <= 1:
-            return None
-
+    def _http_options(self) -> Any:
+        """Hard timeout in milliseconds, and never more than one HTTP attempt."""
         from google.genai import types
 
+        attempts = 1 if self.config.retry_attempts <= 1 else self.config.retry_attempts
         return types.HttpOptions(
-            retry_options=types.HttpRetryOptions(attempts=self.config.retry_attempts)
+            timeout=int(self.config.request_timeout_seconds * 1000),
+            retry_options=types.HttpRetryOptions(attempts=attempts),
         )
+
+    def _thinking_config(self) -> Any:
+        from google.genai import types
+
+        names = {
+            "minimal": types.ThinkingLevel.MINIMAL,
+            "low": types.ThinkingLevel.LOW,
+            "medium": types.ThinkingLevel.MEDIUM,
+            "high": types.ThinkingLevel.HIGH,
+        }
+        level = names.get(self.config.thinking_level.lower(), types.ThinkingLevel.LOW)
+        return types.ThinkingConfig(thinking_level=level, include_thoughts=False)
+
+    def _secrets(self) -> tuple[str, ...]:
+        return (self._api_key or "",)
+
+    def _await_terminal(self, client: Any, interaction: Any) -> Any:
+        """Poll only while the interaction is queued or in progress.
+
+        `create` is foreground by default and should already return a
+        terminal status. `get` exists for the cases it does not
+        (`queued`, `in_progress`). `incomplete` is terminal and is not polled.
+        """
+        deadline = self._clock() + self.config.request_timeout_seconds
+        current = interaction
+
+        while interaction_status(current) in _NON_TERMINAL_STATUSES:
+            remaining = deadline - self._clock()
+            if remaining <= 0:
+                print(interaction_diagnostics(current, self._secrets()), file=sys.stderr)
+                raise GeminiRequestError(
+                    "InteractionTimeout",
+                    api_status=interaction_status(current) or None,
+                    message=GeminiRequestError.INTERACTION_TIMEOUT_MESSAGE,
+                )
+
+            interaction_id = getattr(current, "id", None)
+            if not interaction_id:
+                print(interaction_diagnostics(current, self._secrets()), file=sys.stderr)
+                raise GeminiRequestError(
+                    "InteractionNotCompleted",
+                    api_status=interaction_status(current) or None,
+                    message=redact_secrets(
+                        "The interaction is still processing and has no id to poll.",
+                        self._secrets(),
+                    ),
+                )
+
+            self._sleep(min(self.config.poll_interval_seconds, remaining))
+            if self._clock() >= deadline:
+                print(interaction_diagnostics(current, self._secrets()), file=sys.stderr)
+                raise GeminiRequestError(
+                    "InteractionTimeout",
+                    api_status=interaction_status(current) or None,
+                    message=GeminiRequestError.INTERACTION_TIMEOUT_MESSAGE,
+                )
+
+            getter = getattr(getattr(client, "interactions", None), "get", None)
+            if getter is None:
+                print(interaction_diagnostics(current, self._secrets()), file=sys.stderr)
+                raise GeminiRequestError(
+                    "InteractionNotCompleted",
+                    api_status=interaction_status(current) or None,
+                    message="The interaction is still processing and get() is unavailable.",
+                )
+            try:
+                current = getter(
+                    str(interaction_id),
+                    timeout=min(self.config.request_timeout_seconds, max(1.0, remaining)),
+                )
+            except GeminiRecognizerError:
+                raise
+            except Exception as exc:
+                raise GeminiRequestError.from_exception(
+                    exc, extra_secrets=self._secrets()
+                ) from exc
+
+        return current
 
     def _raise_for_status(self, interaction: Any) -> None:
-        """Turn a non-completed interaction into a diagnosable error."""
-        status = getattr(interaction, "status", None)
-        if status is None or str(status) not in _FAILED_STATUSES:
+        """Turn a failed or empty incomplete interaction into an error."""
+        status = interaction_status(interaction)
+        if not status or status == _COMPLETED_STATUS:
             return
 
-        details = "; ".join(
-            str(getattr(err, "message", None) or err)
-            for err in (getattr(interaction, "errors", None) or [])
-        )
-        raise GeminiRequestError(
-            "InteractionNotCompleted",
-            api_status=str(status),
-            message=redact_secrets(
-                details or f"The interaction finished with status {status}.",
-                (self._api_key or "",),
-            ),
-        )
+        print(interaction_diagnostics(interaction, self._secrets()), file=sys.stderr)
 
-    def recognize_sequence(self, sequence: FrameSequence) -> SignInterpretation:
-        """Interpret a short frame sequence. Makes one Gemini call."""
+        if status in _NON_TERMINAL_STATUSES:
+            raise GeminiRequestError(
+                "InteractionNotCompleted",
+                api_status=status,
+                message=redact_secrets(
+                    f"The interaction is still {status}.",
+                    self._secrets(),
+                ),
+            )
+
+        if status == _INCOMPLETE_STATUS:
+            if interaction_output_text(interaction).strip():
+                # Officially terminal: results may still be usable JSON.
+                return
+            raise GeminiRequestError(
+                "InteractionNotCompleted",
+                api_status=status,
+                message=redact_secrets(
+                    incomplete_reason(
+                        interaction,
+                        self.config.max_output_tokens,
+                        self._secrets(),
+                    ),
+                    self._secrets(),
+                ),
+            )
+
+        if status in _TERMINAL_FAILURE_STATUSES:
+            details = "; ".join(
+                redact_secrets(getattr(err, "message", None) or err, self._secrets())
+                for err in (getattr(interaction, "errors", None) or [])
+            )
+            raise GeminiRequestError(
+                "InteractionNotCompleted",
+                api_status=status,
+                message=details or f"The interaction finished with status {status}.",
+            )
+
+    def translate_sequence(self, sequence: FrameSequence) -> SentenceTranslation:
+        """Translate one signed sentence. Exactly one generate_content call."""
         if not isinstance(sequence, FrameSequence):
             raise GeminiRecognizerError(
-                "recognize_sequence expects a FrameSequence from "
+                "translate_sequence expects a FrameSequence from "
                 "sequence_capture, not a single frame."
             )
         if not sequence.shows_movement:
-            return SignInterpretation.unknown(
-                "Too few frames to show movement; a sign needs a sequence.",
+            return SentenceTranslation.unknown(
+                "Too few frames to show movement; signing needs a sequence.",
                 len(sequence),
             )
 
         client = self._ensure_client()
-        model_input = self._build_input(sequence)
-
+        contents = self._build_generate_contents(sequence)
+        print(
+            f"Gemini request started... ({len(sequence)} frames, "
+            f"{self.config.request_timeout_seconds:g}s timeout)",
+            flush=True,
+        )
+        started = time.perf_counter()
         try:
-            from google.genai import interactions
+            from google.genai import types
 
-            interaction = client.interactions.create(
+            response = client.models.generate_content(
                 model=self.config.model,
-                input=model_input,
-                system_instruction=SYSTEM_PROMPT,
-                response_format=RESPONSE_SCHEMA,
-                response_mime_type=RESPONSE_MIME_TYPE,
-                generation_config=interactions.GenerationConfig(
+                contents=contents,
+                config=types.GenerateContentConfig(
+                    system_instruction=SYSTEM_PROMPT,
                     temperature=self.config.temperature,
                     max_output_tokens=self.config.max_output_tokens,
-                    # Classifying three signs needs recognition, not
-                    # deliberation; deep thinking is the main latency cost.
-                    thinking_level=self.config.thinking_level,
-                    thinking_summaries="none",
+                    response_mime_type=RESPONSE_MIME_TYPE,
+                    response_schema=RESPONSE_SCHEMA,
+                    thinking_config=self._thinking_config(),
+                    http_options=self._http_options(),
                 ),
-                # Seconds here, unlike the older http_options milliseconds.
-                timeout=self.config.request_timeout_seconds,
             )
         except GeminiRecognizerError:
             raise
         except Exception as exc:
-            # Keeps the status and provider message for debugging, but only
-            # after redact_secrets has been over them.
             raise GeminiRequestError.from_exception(
-                exc, extra_secrets=(self._api_key or "",)
+                exc, extra_secrets=self._secrets()
             ) from exc
 
-        return self._parse_response(interaction, len(sequence))
+        elapsed = time.perf_counter() - started
+        print(f"Gemini completed in {elapsed:.1f} sec", flush=True)
+        text = getattr(response, "text", None) or ""
+        return self._parse_model_text(str(text), len(sequence))
+
+    def _build_generate_contents(self, sequence: FrameSequence) -> list[Any]:
+        """One chronological JPEG list. Never a full-rate video, never one frame."""
+        from google.genai import types
+
+        jpegs = encode_frames_to_jpeg(sequence, self.config.jpeg_quality)
+        total = len(jpegs)
+        parts: list[Any] = [
+            types.Part.from_text(
+                text=(
+                    f"You are interpreting a short temporal sequence of {total} "
+                    f"images covering {sequence.duration:.2f} seconds of American "
+                    "Sign Language. Analyze the sequence as a whole. Do not "
+                    "interpret each frame independently. Use the hand movements "
+                    "across time to infer the intended ASL message. Return the "
+                    "JSON object only."
+                )
+            )
+        ]
+        for position, (jpeg, timestamp) in enumerate(zip(jpegs, sequence.timestamps)):
+            parts.append(
+                types.Part.from_text(
+                    text=f"Frame {position + 1} of {total}, t = {timestamp:.2f}s:"
+                )
+            )
+            parts.append(
+                types.Part.from_bytes(data=jpeg, mime_type=JPEG_MIME_TYPE)
+            )
+        return parts
 
     def _build_input(self, sequence: FrameSequence) -> list[Any]:
         """Build the interaction input for the whole clip, in one request.
@@ -557,10 +1004,10 @@ class GeminiSignRecognizer:
             type="video",
             mime_type=VIDEO_MIME_TYPE,
             data=base64.b64encode(video).decode("ascii"),
-            # Static processing: the whole clip is 1-2 seconds, so there is
-            # nothing for agentic search to explore. Passing fps explicitly
-            # matters -- the default sampling would thin a clip this short down
-            # to roughly one frame and destroy the movement.
+            # Static processing: the clip is a few seconds of one sentence,
+            # so there is nothing for agentic search to explore. Passing fps
+            # explicitly matters -- default video sampling would thin the clip
+            # and destroy the movement between signs.
             processing=interactions.StaticMediaProcessing(type="static", fps=fps),
         )
         if self.config.media_resolution:
@@ -570,10 +1017,13 @@ class GeminiSignRecognizer:
             interactions.TextContent(
                 type="text",
                 text=(
-                    f"This is one continuous {sequence.duration:.2f} second clip "
-                    f"of a single ASL signing event, {len(sequence)} frames at "
-                    f"{fps:.1f} fps. Identify the sign produced across the whole "
-                    "clip, or answer unknown."
+                    f"This is one continuous {sequence.duration:.2f} second "
+                    f"recording of a complete ASL signing event, "
+                    f"{len(sequence)} frames at {fps:.1f} fps, in "
+                    "chronological order. Interpret the entire sequence and "
+                    "translate its meaning into one natural English sentence. "
+                    "Do not emit one word per frame. If the signing is too "
+                    "ambiguous, leave english_translation empty."
                 ),
             ),
             content,
@@ -594,10 +1044,13 @@ class GeminiSignRecognizer:
             interactions.TextContent(
                 type="text",
                 text=(
-                    f"The following {total} frames are one continuous clip of "
-                    f"{sequence.duration:.2f} seconds, in chronological order. "
-                    "Identify the single ASL sign being produced across the "
-                    "whole clip, or answer unknown."
+                    f"The following {total} frames are one continuous "
+                    f"{sequence.duration:.2f} second recording of a complete "
+                    "ASL signing event, in chronological order. Interpret the "
+                    "entire sequence and translate its meaning into one "
+                    "natural English sentence. Do not emit one word per "
+                    "frame. If the signing is too ambiguous, leave "
+                    "english_translation empty."
                 ),
             )
         ]
@@ -618,59 +1071,46 @@ class GeminiSignRecognizer:
             )
         return items
 
-    def _parse_response(self, interaction: Any, frame_count: int) -> SignInterpretation:
-        """Validate Gemini's JSON and refuse answers outside the vocabulary."""
+    def _parse_response(self, interaction: Any, frame_count: int) -> SentenceTranslation:
+        """Validate Gemini's JSON and refuse to pass on a shaky translation."""
         self._raise_for_status(interaction)
+        return self._parse_model_text(interaction_output_text(interaction), frame_count)
 
-        text = interaction_output_text(interaction).strip()
-        if not text:
-            return SignInterpretation.unknown(
-                "Gemini returned an empty response.", frame_count
-            )
+    def _parse_model_text(self, text: str, frame_count: int) -> SentenceTranslation:
+        preview = preview_model_text(text, self._secrets())
+        print(f"Gemini raw model text (sanitized): {preview}", file=sys.stderr)
 
         try:
-            payload = json.loads(text)
-        except json.JSONDecodeError as exc:
-            raise GeminiRecognizerError(
-                "Gemini did not return valid JSON: "
-                f"{redact_secrets(exc, (self._api_key or '',))}"
-            ) from exc
-        if not isinstance(payload, dict):
-            raise GeminiRecognizerError(
-                f"Expected a JSON object from Gemini, got {type(payload).__name__}."
+            payload = parse_gemini_json(text)
+        except GeminiJsonError as exc:
+            message = redact_secrets(exc, self._secrets())
+            print(f"Gemini JSON parse failed: {message}", file=sys.stderr)
+            return SentenceTranslation.unknown(
+                message,
+                frame_count,
+                {"raw_text": preview, "parse_error": message},
             )
 
-        sign = str(payload.get("sign", UNKNOWN_SIGN)).strip().lower()
-        description = str(payload.get("description", "")).strip()
-        try:
-            confidence = float(payload.get("confidence", 0.0))
-        except (TypeError, ValueError):
-            confidence = 0.0
-        confidence = min(1.0, max(0.0, confidence))
-
-        # A model can still answer outside the enum; treat that as unknown
-        # rather than passing an unsupported label to the rest of the app.
-        if sign not in ALLOWED_ANSWERS:
-            return SignInterpretation(
-                False, UNKNOWN_SIGN, confidence,
-                f"Gemini reported an unsupported sign {sign!r}. {description}".strip(),
-                frame_count, payload,
-            )
-
-        recognized = bool(payload.get("recognized", False)) and sign != UNKNOWN_SIGN
+        translation = payload["english_translation"]
+        notes = payload["notes"]
+        confidence = payload["confidence"]
+        recognized = payload["recognized"] and bool(translation)
         if recognized and confidence < self.config.confidence_threshold:
-            return SignInterpretation(
-                False, UNKNOWN_SIGN, confidence,
-                f"Below the {self.config.confidence_threshold:.0%} confidence "
-                f"threshold for {sign!r}. {description}".strip(),
-                frame_count, payload,
+            return SentenceTranslation(
+                False,
+                "",
+                confidence,
+                (
+                    f"Below the {self.config.confidence_threshold:.0%} "
+                    f"confidence threshold. {notes}"
+                ).strip(),
+                frame_count,
+                payload,
             )
-
-        return SignInterpretation(
-            recognized,
-            sign if recognized else UNKNOWN_SIGN,
-            confidence,
-            description,
-            frame_count,
-            payload,
+        if not recognized:
+            return SentenceTranslation(
+                False, "", confidence, notes, frame_count, payload
+            )
+        return SentenceTranslation(
+            True, translation, confidence, notes, frame_count, payload
         )

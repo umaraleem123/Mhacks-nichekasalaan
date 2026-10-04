@@ -1,9 +1,5 @@
 # SignBridge dependencies.
 #
-# Added incrementally, one development milestone at a time.
-
-# Milestone 1: webcam access + hand tracking
-#
 # mediapipe is pinned to the last release that still ships the stable legacy
 # `mp.solutions.hands` API. Newer releases (0.10.35 and 1.x) removed it, and
 # their replacement Tasks API aborts the process on Apple Silicon inside Metal.
@@ -15,19 +11,14 @@ mediapipe==0.10.21
 # competing copies of cv2.
 opencv-contrib-python>=4.8,<5
 
-# Milestone 2: ASL sign classifier (random forest over landmark features).
-# joblib ships with scikit-learn and is its documented way to persist models;
-# it is listed because train.py and recognizer.py import it directly.
+# Optional: the unused Milestone 2 frame classifier still imports these.
 scikit-learn>=1.3,<2
 joblib>=1.3
 
-# Milestone 3: Gemini multimodal ASL recognition over a frame sequence.
-# google-genai is the current unified Google AI SDK (`from google import genai`);
-# the older google-generativeai package is superseded. It installs cleanly
-# against the numpy<2 pin above.
-#
-# The floor is 2.28 because the recognizer uses the Interactions API
-# (`client.interactions.create`), which earlier releases do not expose.
-google-genai>=2.28,<3
+# Live temporal classifier (local BiGRU). Pins stay below 2.6 so the wheel
+# still installs against mediapipe's numpy<2 requirement.
+torch>=2.1,<2.6
 
-
+# ElevenLabs TTS playback. Audio is fetched with urllib (stdlib); this plays
+# the PCM stream through PortAudio on macOS and Windows.
+sounddevice>=0.4,<0.6
