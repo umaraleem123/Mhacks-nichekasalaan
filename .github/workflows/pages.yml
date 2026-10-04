@@ -1,0 +1,51 @@
+name: Publish Signify
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Assemble the static page
+        run: |
+          python3 << 'PY'
+          from pathlib import Path
+
+          root = Path("SignBridge/src/web")
+          html = (root / "templates" / "index.html").read_text(encoding="utf-8")
+          for name in ("styles.css", "app.js", "signify-logo.jpg"):
+              token = "{{ url_for('static', filename='%s') }}" % name
+              html = html.replace(token, name)
+          if "{{" in html:
+              raise SystemExit("template tags were left in index.html")
+
+          out = Path("site")
+          out.mkdir()
+          (out / "index.html").write_text(html, encoding="utf-8")
+          for name in ("styles.css", "app.js", "signify-logo.jpg"):
+              (out / name).write_bytes((root / "static" / name).read_bytes())
+          PY
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+      - id: deployment
+        uses: actions/deploy-pages@v4
