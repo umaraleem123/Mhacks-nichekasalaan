@@ -59,6 +59,7 @@ Copy `.env.example` to `.env` and set `ELEVENLABS_API_KEY` (and optionally
 python -m src.asl.sequence_data_collector   # ~20–30 clips per sign
 python -m src.asl.train_sequence_model
 python -m src.asl.signbridge_demo
+python -m src.web.server                    # browser UI at http://127.0.0.1:5000
 python -m unittest discover -s tests -v
 ```
 
@@ -158,6 +159,25 @@ one that confidently says the wrong word.
 
 `SIGNBRIDGE_CONFIDENCE_THRESHOLD` overrides the numeric cutoff.
 
+## Web app
+
+```bash
+python -m src.web.server
+```
+
+Then open [http://127.0.0.1:5000](http://127.0.0.1:5000) and click
+**Start camera**. The page shows the live feed with landmarks, the predicted
+sign and confidence, a transcript of recognized signs (optionally read aloud),
+and a sensitivity slider. The browser captures the webcam and posts frames to
+the local server.
+
+This server uses the temporal sequence model (`models/asl_sequence_model.pt`).
+Without that file the page still tracks hands. After training, click
+**Reload model** instead of restarting the server.
+
+Options: `--host`, `--port`, `--model`. Browsers only allow webcam access on
+`localhost`/`127.0.0.1` or over HTTPS, so open the page from the same machine.
+
 ## ElevenLabs
 
 ```
@@ -167,24 +187,6 @@ ELEVENLABS_VOICE_ID=21m00Tcm4TlvDq8ikWAM
 
 If the key is missing or a request fails, the English translation still
 appears. The app does not crash, and keys are never logged.
-
-## Web app
-
-```
-python -m src.web.server
-```
-
-Then open [http://127.0.0.1:5000](http://127.0.0.1:5000) and click
-**Start camera**. The page shows the live feed with landmarks, the predicted
-sign and confidence, a transcript of recognized signs (optionally read aloud),
-and a sensitivity slider. The browser captures the webcam and posts frames to
-the local server, which runs the same tracker and model as the desktop app.
-
-Without a trained model the page still tracks hands and shows how to train
-one; after training, click **Reload model** instead of restarting the server.
-
-Options: `--host`, `--port`, `--model`. Browsers only allow webcam access on
-`localhost`/`127.0.0.1` or over HTTPS, so open the page from the same machine.
 
 ## Tests
 

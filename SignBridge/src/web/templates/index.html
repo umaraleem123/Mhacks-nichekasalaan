@@ -118,9 +118,9 @@
 
           <section class="card notice" id="no-model" hidden>
             <h3>Nothing planted yet</h3>
-            <p>Hand tracking works, but there is no trained model to recognize against. From the <code>SignBridge</code> folder, run:</p>
-            <pre>python -m src.asl.data_collector
-python -m src.asl.train</pre>
+            <p>Hand tracking works, but there is no trained sequence model. From the <code>SignBridge</code> folder, run:</p>
+            <pre>python -m src.asl.sequence_data_collector
+python -m src.asl.train_sequence_model</pre>
             <button class="btn btn-outline btn-small" id="reload-btn">Reload model</button>
           </section>
 

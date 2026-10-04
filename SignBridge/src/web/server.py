@@ -5,8 +5,8 @@ Run it with:
     python -m src.web.server
 
 then open http://127.0.0.1:5000. The browser owns the webcam and posts JPEG
-frames here; this server runs the same `HandTracker` and `SignRecognizer` as
-`src.asl.live_recognition`, so predictions match the desktop app exactly.
+frames here. This server runs the same temporal BiGRU path as
+`python -m src.asl.signbridge_demo`.
 """
 
 from __future__ import annotations
@@ -21,49 +21,89 @@ import cv2
 import numpy as np
 from flask import Flask, jsonify, render_template, request
 
+from src import SEQUENCE_LABELS_PATH, SEQUENCE_MODEL_PATH
 from src.asl import SIGNS
-from src.asl.features import FeatureError, extract_features
-from src.asl.recognizer import (
-    DEFAULT_CONFIDENCE_THRESHOLD,
-    UNKNOWN_SIGN,
-    RecognizerError,
-    SignRecognizer,
+from src.asl.sequence_features import positions_from_hands
+from src.asl.sequence_model import load_sequence_model
+from src.asl.sequence_recognition import (
+    LiveSequenceRecognizer,
+    RecognitionSession,
+    demo_settings,
 )
 from src.vision.hand_tracker import HandTracker, HandTrackerError
 
 MAX_FRAME_BYTES = 4 * 1024 * 1024
+UNKNOWN_SIGN = "unknown"
+
+
+class SequenceModelError(RuntimeError):
+    """The temporal model is missing or cannot be loaded."""
 
 
 class RecognitionService:
-    """Owns the tracker and the model; one frame at a time.
+    """Owns the tracker, rolling landmark buffer, and sequence model.
 
     MediaPipe's video mode keeps state between frames and is not thread-safe,
     so every call goes through a single lock.
     """
 
-    def __init__(self, model_path: Path | None) -> None:
+    def __init__(
+        self,
+        model_path: Path | None = None,
+        labels_path: Path | None = None,
+    ) -> None:
         self._lock = threading.Lock()
-        self._model_path = model_path
+        self._model_path = Path(model_path) if model_path else SEQUENCE_MODEL_PATH
+        self._labels_path = Path(labels_path) if labels_path else SEQUENCE_LABELS_PATH
+        self._settings = demo_settings()
         self._tracker = HandTracker(max_hands=2)
-        self._recognizer: SignRecognizer | None = None
+        self._recognizer: LiveSequenceRecognizer | None = None
+        self._session: RecognitionSession | None = None
         self.model_error: str | None = None
         self.reload_model()
 
     def reload_model(self) -> None:
         with self._lock:
             try:
-                self._recognizer = SignRecognizer(self._model_path)
+                self._recognizer, classes = self._load_recognizer()
+                self._session = RecognitionSession(
+                    self._recognizer, settings=self._settings
+                )
                 self.model_error = None
-            except RecognizerError as exc:
+                self._classes = classes
+            except SequenceModelError as exc:
                 self._recognizer = None
+                self._session = None
+                self._classes = list(SIGNS)
                 self.model_error = str(exc)
 
+    def _load_recognizer(self) -> tuple[LiveSequenceRecognizer, list[str]]:
+        if not self._model_path.is_file():
+            raise SequenceModelError(
+                f"No trained sequence model at {self._model_path}.\n"
+                "Collect clips, then train:\n"
+                "  python -m src.asl.sequence_data_collector\n"
+                "  python -m src.asl.train_sequence_model"
+            )
+        try:
+            model, classes, _meta = load_sequence_model(
+                self._model_path, self._labels_path
+            )
+        except Exception as exc:
+            raise SequenceModelError(
+                f"Could not load the sequence model at {self._model_path}: {exc}\n"
+                "Retrain it with:  python -m src.asl.train_sequence_model"
+            ) from exc
+        recognizer = LiveSequenceRecognizer(
+            model, classes, threshold=float(self._settings["threshold"])
+        )
+        return recognizer, list(classes)
+
     def status(self) -> dict[str, Any]:
-        recognizer = self._recognizer
         return {
-            "model_loaded": recognizer is not None,
-            "classes": recognizer.classes if recognizer else list(SIGNS),
-            "default_threshold": DEFAULT_CONFIDENCE_THRESHOLD,
+            "model_loaded": self._recognizer is not None,
+            "classes": list(getattr(self, "_classes", SIGNS)),
+            "default_threshold": float(self._settings["threshold"]),
             "error": self.model_error,
         }
 
@@ -71,17 +111,22 @@ class RecognitionService:
         frame = cv2.imdecode(np.frombuffer(jpeg, dtype=np.uint8), cv2.IMREAD_COLOR)
         if frame is None:
             raise ValueError("Could not decode the frame as an image.")
-        frame = cv2.flip(frame, 1)  # selfie view, and what handedness assumes
+        frame = cv2.flip(frame, 1)
 
         with self._lock:
             hands = self._tracker.process(frame)
             sign, confidence = UNKNOWN_SIGN, 0.0
-            if hands and self._recognizer is not None:
-                self._recognizer.confidence_threshold = threshold
-                try:
-                    sign, confidence = self._recognizer.predict(extract_features(hands[0]))
-                except FeatureError:
-                    pass
+            session = self._session
+            recognizer = self._recognizer
+            if session is not None and recognizer is not None:
+                recognizer.threshold = threshold
+                session.smoother.threshold = threshold
+                session.push_positions(positions_from_hands(hands))
+                prediction = session.maybe_infer()
+                session.poll()
+                confidence = float(session.confidence)
+                if prediction is not None and prediction.label:
+                    sign = prediction.label
 
         return {
             "hands": [
@@ -120,7 +165,9 @@ def create_app(service: RecognitionService) -> Flask:
 
     @app.post("/api/frame")
     def frame():
-        threshold = request.args.get("threshold", DEFAULT_CONFIDENCE_THRESHOLD, type=float)
+        threshold = request.args.get(
+            "threshold", float(demo_settings()["threshold"]), type=float
+        )
         threshold = min(max(threshold, 0.0), 1.0)
         try:
             return jsonify(service.process(request.get_data(), threshold))
@@ -139,7 +186,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=5000)
-    parser.add_argument("--model", type=Path, default=None, help="trained model path")
+    parser.add_argument("--model", type=Path, default=None, help="trained sequence model path")
+    parser.add_argument("--labels", type=Path, default=None, help="sequence labels JSON path")
     return parser.parse_args(argv)
 
 
@@ -147,7 +195,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
 
     try:
-        service = RecognitionService(args.model)
+        service = RecognitionService(args.model, args.labels)
     except HandTrackerError as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1
