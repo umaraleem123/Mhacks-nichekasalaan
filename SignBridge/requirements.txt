@@ -19,6 +19,11 @@ joblib>=1.3
 # still installs against mediapipe's numpy<2 requirement.
 torch>=2.1,<2.6
 
+# ElevenLabs TTS. The live demo still talks HTTP via urllib; the audio
+# diagnostic (`python -m src.speech.test_elevenlabs_audio`) uses the official
+# SDK. convert() in 2.x returns Iterator[bytes].
+elevenlabs>=2.50,<3
+
 # ElevenLabs TTS playback. Audio is fetched with urllib (stdlib); this plays
-# the PCM stream through PortAudio on macOS and Windows.
+# the PCM/WAV stream through PortAudio on macOS and Windows.
 sounddevice>=0.4,<0.6
