@@ -1,6 +1,6 @@
 """Live temporal sign recognition — sequences, not single frames.
 
-A rolling 2–3 second buffer of two-hand landmarks is classified a few times
+A rolling 3.5 second buffer of two-hand landmarks is classified a few times
 per second. Predictions below the confidence threshold, or without enough
 motion, become Unknown. Stable labels feed a sentence buffer and TTS.
 """
@@ -29,7 +29,7 @@ from src.asl.sequence_model import SequenceBiGRU, softmax_probs
 UNKNOWN = "unknown"
 DEMO_MODE_ENV = "SIGNBRIDGE_DEMO_MODE"
 CONFIDENCE_ENV = "SIGNBRIDGE_CONFIDENCE_THRESHOLD"
-DEFAULT_BUFFER_SECONDS = 2.5
+DEFAULT_BUFFER_SECONDS = 3.5
 DEFAULT_INFERENCE_HZ = 4.0
 DEFAULT_MIN_FRAMES = 12
 

@@ -17,7 +17,7 @@ Live vocabulary:
 
 `HELLO`, `YES`, `NO`, `THANK_YOU`, `PLEASE`, `HELP`, `SORRY`, `GOOD`, `BAD`,
 `HOW_ARE_YOU`, `I_ME`, `YOU`, `WANT`, `NEED`, `UNDERSTAND`, `DONT_UNDERSTAND`,
-`WHAT`, `WHERE`, `NAME`, `GOODBYE`
+`WHAT`, `WHERE`, `NAME`, `GOODBYE`, `NICE_TO_MEET_YOU`
 
 These are prototype labels, not a claim of full ASL translation.
 
@@ -78,7 +78,7 @@ python -m src.asl.sequence_data_collector
 SPACE starts a clip, SPACE stops it and saves **one** `.npz` sequence under
 `data/sequences/<sign>/`. N / P change the sign. Q quits.
 
-Default max length is **2.5 seconds** (`SIGNBRIDGE_SEQUENCE_SECONDS`). You do
+Default max length is **3.5 seconds** (`SIGNBRIDGE_SEQUENCE_SECONDS`). You do
 not have to start the motion on the exact frame recording begins. Aim for
 about 20–30 complete motions per sign (200–300 total). Do not save individual
 webcam frames as the training set.
@@ -94,7 +94,7 @@ back into `main` does not conflict.
 | --- | --- | --- |
 | `collect/group-1` | `--group 1` | `i_me`, `you`, `name`, `goodbye` |
 | `collect/group-2` | `--group 2` | `want`, `need`, `what` |
-| `collect/group-3` | `--group 3` | `understand`, `dont_understand`, `where` |
+| `collect/group-3` | `--group 3` | `understand`, `dont_understand`, `where`, `nice_to_meet_you` |
 
 `i_me` is the single point-to-self sign (I / me). `understand` and
 `dont_understand` stay with the same person because they are easy to confuse.
@@ -142,7 +142,7 @@ Runs on laptop CPU.
 python -m src.asl.signbridge_demo
 ```
 
-The demo classifies a rolling 2–3 second window a few times per second. It
+The demo classifies a rolling 3.5 second window a few times per second. It
 does **not** treat a single frame as a sign.
 
 - Confidence below the threshold (default **0.80** in demo mode, **0.75**
