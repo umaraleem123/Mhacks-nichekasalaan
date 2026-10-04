@@ -408,6 +408,9 @@ class CollectorAndPhraseTests(unittest.TestCase):
                 "where",
                 "name",
                 "goodbye",
+                "do",
+                "can",
+                "okay",
             },
         )
         self.assertEqual(

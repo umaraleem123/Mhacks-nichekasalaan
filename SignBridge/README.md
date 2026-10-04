@@ -92,7 +92,7 @@ back into `main` does not conflict.
 | Branch | Command | Signs |
 | --- | --- | --- |
 | `collect/group-1` | `--group 1` | `i_me`, `you`, `name`, `goodbye` |
-| `collect/group-2` | `--group 2` | `want`, `need`, `what` |
+| `collect/group-2` | `--group 2` | `want`, `need`, `what`, `do`, `can`, `okay` |
 | `collect/group-3` | `--group 3` | `understand`, `dont_understand`, `where` |
 
 `i_me` is the single point-to-self sign (I / me). `understand` and

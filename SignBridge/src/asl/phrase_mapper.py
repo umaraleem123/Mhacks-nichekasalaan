@@ -29,6 +29,9 @@ PHRASE_BY_LABEL: dict[str, str] = {
     "where": "Where",
     "name": "Name",
     "goodbye": "Goodbye",
+    "do": "Do",
+    "can": "Can",
+    "okay": "Okay",
 }
 
 

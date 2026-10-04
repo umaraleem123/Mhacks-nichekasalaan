@@ -28,6 +28,9 @@ SIGNS: list[str] = [
     "where",
     "name",
     "goodbye",
+    "do",
+    "can",
+    "okay",
 ]
 
 # Each group records a disjoint set of the new signs. Clips land in
@@ -35,7 +38,7 @@ SIGNS: list[str] = [
 # different folders and do not conflict.
 COLLECTION_GROUPS: dict[str, list[str]] = {
     "1": ["i_me", "you", "name", "goodbye"],
-    "2": ["want", "need", "what"],
+    "2": ["want", "need", "what", "do", "can", "okay"],
     "3": ["understand", "dont_understand", "where"],
 }
 
