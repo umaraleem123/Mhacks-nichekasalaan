@@ -51,10 +51,11 @@ models/pretrained/
 models/pretrained/**
 !models/pretrained/.gitkeep
 
-# Captured/recorded datasets
+# Captured/recorded datasets (sequence clips are tracked so the demo can train)
 data/*
 !data/.gitkeep
-data/sequences/
+!data/sequences/
+!data/sequences/**
 
 # Large media in assets/ (small reference images stay tracked)
 assets/**/*.mp4
