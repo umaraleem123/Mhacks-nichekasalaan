@@ -78,7 +78,7 @@ python -m src.asl.sequence_data_collector
 SPACE starts a clip, SPACE stops it and saves **one** `.npz` sequence under
 `data/sequences/<sign>/`. N / P change the sign. Q quits.
 
-Default max length is **3.5 seconds** (`SIGNBRIDGE_SEQUENCE_SECONDS`). You do
+Default max length is **5 seconds** (`SIGNBRIDGE_SEQUENCE_SECONDS`). You do
 not have to start the motion on the exact frame recording begins. Aim for
 about 20–30 complete motions per sign (200–300 total). Do not save individual
 webcam frames as the training set.
@@ -147,7 +147,7 @@ Runs on laptop CPU.
 python -m src.asl.signbridge_demo
 ```
 
-The demo classifies a rolling 3.5 second window a few times per second. It
+The demo classifies a rolling 5 second window a few times per second. It
 does **not** treat a single frame as a sign.
 
 - Confidence below the threshold (default **0.80** in demo mode, **0.75**
