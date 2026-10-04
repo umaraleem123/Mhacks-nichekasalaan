@@ -171,9 +171,8 @@ sign and confidence, a transcript of recognized signs (optionally read aloud),
 and a sensitivity slider. The browser captures the webcam and posts frames to
 the local server.
 
-This server still uses the older single-frame classifier
-(`models/asl_classifier.pkl`), not the temporal BiGRU demo. Without that
-model the page still tracks hands. After training the frame classifier, click
+This server uses the temporal sequence model (`models/asl_sequence_model.pt`).
+Without that file the page still tracks hands. After training, click
 **Reload model** instead of restarting the server.
 
 Options: `--host`, `--port`, `--model`. Browsers only allow webcam access on
