@@ -23,7 +23,7 @@ import cv2
 import numpy as np
 
 from src import SEQUENCE_DATA_DIR
-from src.asl import collection_signs, display_label
+from src.asl import COLLECTION_GROUPS, collection_signs, display_label
 from src.asl.sequence_dataset import save_sequence
 from src.asl.sequence_features import frame_features, positions_from_hands
 from src.vision.camera import CAMERA_LOST_ERROR, open_camera
@@ -134,9 +134,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--camera", type=int, default=None)
     parser.add_argument(
         "--group",
-        choices=("1", "2", "3"),
+        choices=tuple(COLLECTION_GROUPS),
         default=None,
-        help="Record only this person's signs (see COLLECTION_GROUPS).",
+        help="Record only this collection group (see COLLECTION_GROUPS).",
     )
     parser.add_argument(
         "--signs",
@@ -232,7 +232,7 @@ def run_loop(
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     try:
-        signs = collection_signs(args.group, args.signs)
+        signs = collection_signs(None if args.signs else args.group, args.signs)
     except ValueError as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1
