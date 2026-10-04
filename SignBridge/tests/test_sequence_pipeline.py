@@ -417,6 +417,21 @@ class CollectorAndPhraseTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             collection_signs(group="1", signs="you")
         self.assertEqual(
+            collection_signs(group="original"),
+            [
+                "bad",
+                "good",
+                "hello",
+                "help",
+                "how_are_you",
+                "no",
+                "please",
+                "sorry",
+                "thank_you",
+                "yes",
+            ],
+        )
+        self.assertEqual(
             format_sentence(["hello", "how_are_you"]),
             "Hello, how are you?",
         )

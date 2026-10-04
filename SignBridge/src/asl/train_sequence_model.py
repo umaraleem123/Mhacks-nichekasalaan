@@ -21,6 +21,7 @@ import torch
 from torch.utils.data import DataLoader, Dataset
 
 from src import SEQUENCE_DATA_DIR, SEQUENCE_LABELS_PATH, SEQUENCE_MODEL_PATH
+from src.asl import COLLECTION_GROUPS, collection_signs
 from src.asl.sequence_dataset import (
     SequenceDataError,
     SequenceExample,
@@ -82,6 +83,17 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         description="Train the SignBridge temporal ASL classifier.",
     )
     parser.add_argument("--data-dir", type=str, default=None)
+    parser.add_argument(
+        "--group",
+        choices=tuple(COLLECTION_GROUPS),
+        default="original",
+        help="Train only these signs. This branch defaults to the original ten.",
+    )
+    parser.add_argument(
+        "--all",
+        action="store_true",
+        help="Train every sign folder instead of --group.",
+    )
     parser.add_argument("--epochs", type=int, default=DEFAULT_EPOCHS)
     parser.add_argument("--batch-size", type=int, default=DEFAULT_BATCH_SIZE)
     parser.add_argument("--lr", type=float, default=DEFAULT_LR)
@@ -129,11 +141,23 @@ def train(
     seed: int = RANDOM_SEED,
     model_path=None,
     labels_path=None,
+    labels: list[str] | None = None,
 ) -> dict:
     torch.manual_seed(seed)
     np.random.seed(seed)
 
     examples = load_all_sequences(data_dir or SEQUENCE_DATA_DIR)
+    if labels is not None:
+        allowed = set(labels)
+        examples = [example for example in examples if example.label in allowed]
+        missing = [label for label in labels if label not in {example.label for example in examples}]
+        if missing:
+            raise SequenceDataError(
+                "No clips for: " + ", ".join(missing) + ".\n"
+                "Record them with:  python -m src.asl.sequence_data_collector --group original"
+            )
+        if not examples:
+            raise SequenceDataError("No clips matched the selected signs.")
     counts = Counter(example.label for example in examples)
     for label, count in sorted(counts.items()):
         if count < MIN_SEQUENCES_PER_CLASS:
@@ -247,6 +271,7 @@ def main(argv: list[str] | None = None) -> int:
             batch_size=args.batch_size,
             lr=args.lr,
             seed=args.seed,
+            labels=None if args.all else collection_signs(group=args.group),
         )
     except SequenceDataError as exc:
         print(f"Error: {exc}", file=sys.stderr)

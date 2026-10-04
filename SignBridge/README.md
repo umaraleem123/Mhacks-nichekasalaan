@@ -95,6 +95,11 @@ back into `main` does not conflict.
 | `collect/group-1` | `--group 1` | `i_me`, `you`, `name`, `goodbye` |
 | `collect/group-2` | `--group 2` | `want`, `need`, `what` |
 | `collect/group-3` | `--group 3` | `understand`, `dont_understand`, `where` |
+| `collect/original` | `--group original` | `bad`, `good`, `hello`, `help`, `how_are_you`, `no`, `please`, `sorry`, `thank_you`, `yes` |
+
+`collect/original` is for adding more clips of the first ten signs. On that
+branch the collector and the trainer default to those signs. `--all` trains
+every folder instead.
 
 `i_me` is the single point-to-self sign (I / me). `understand` and
 `dont_understand` stay with the same person because they are easy to confuse.
