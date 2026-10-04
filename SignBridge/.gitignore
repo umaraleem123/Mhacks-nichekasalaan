@@ -27,6 +27,8 @@ htmlcov/
 # Environment / secrets
 .env
 .env.*
+# The committed template holds no real key.
+!.env.example
 
 # IDE and editor files
 .vscode/
@@ -41,13 +43,29 @@ Thumbs.db
 # Trained models and large artifacts (keep the directories themselves)
 models/*
 !models/.gitkeep
+models/asl_sequence_model.pt
+models/asl_sequence_labels.json
 
-# Captured/recorded datasets
+# Hugging Face pretrained checkpoint + label map (unused live path; downloaded on demand)
+models/pretrained/
+models/pretrained/**
+!models/pretrained/.gitkeep
+
+# Captured/recorded datasets (sequence clips are tracked so the demo can train)
 data/*
 !data/.gitkeep
+!data/sequences/
+!data/sequences/**
 
 # Large media in assets/ (small reference images stay tracked)
 assets/**/*.mp4
 assets/**/*.mov
 assets/**/*.avi
 assets/**/*.webm
+
+# Temporary encoded sentence clips must never be committed. The recognizer
+# writes them under tempfile and deletes them; this is a backstop.
+*.mp4
+*.mov
+*.avi
+*.webm

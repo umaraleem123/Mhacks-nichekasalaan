@@ -1,8 +1,8 @@
-"""SignBridge — Milestone 1: live webcam hand tracking.
+"""SignBridge — webcam hand tracking (no classifier).
 
 Opens a Logitech Brio when one is connected, otherwise the default camera,
-overlays MediaPipe hand landmarks, and shows the result in a window. No sign
-recognition here; that lives in `src.asl.live_recognition`.
+overlays MediaPipe hand landmarks, and shows the result in a window. Sign
+recognition lives in `python -m src.asl.signbridge_demo`.
 """
 
 from __future__ import annotations
