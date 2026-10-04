@@ -1,9 +1,36 @@
 "use strict";
 
-const CAPTURE_WIDTH = 640;
-const JPEG_QUALITY = 0.75;
+const CAPTURE_WIDTH = 480;
+const JPEG_QUALITY = 0.6;
 const STABLE_FRAMES = 6;
 const UNKNOWN = "unknown";
+const PHRASES = {
+  hello: "Hello",
+  yes: "Yes",
+  no: "No",
+  thank_you: "Thank you",
+  please: "Please",
+  help: "Help",
+  sorry: "Sorry",
+  good: "Good",
+  bad: "Bad",
+  how_are_you: "How are you?",
+  i_me: "I",
+  you: "You",
+  want: "Want",
+  need: "Need",
+  understand: "Understand",
+  dont_understand: "Don't understand",
+  what: "What",
+  where: "Where",
+  name: "Name",
+  goodbye: "Goodbye",
+};
+
+function displayLabel(name) {
+  if (!name) return name;
+  return PHRASES[name] || name.replaceAll("_", " ");
+}
 
 const HAND_CONNECTIONS = [
   [0, 1], [1, 2], [2, 3], [3, 4],
@@ -23,7 +50,9 @@ const el = {
   meterFill: $("meter-fill"), meterMark: $("meter-mark"), confidenceText: $("confidence-text"),
   latency: $("latency"), pill: $("model-pill"), pillText: $("model-pill-text"),
   noModel: $("no-model"), reloadBtn: $("reload-btn"), chips: $("chips"), classCount: $("class-count"),
-  transcript: $("transcript"), clearBtn: $("clear-btn"), speakToggle: $("speak-toggle"),
+  transcript: $("transcript"), sentenceLine: $("sentence-line"),
+  clearBtn: $("clear-btn"), transcribeBtn: $("transcribe-btn"),
+  transcribeStatus: $("transcribe-status"),
   threshold: $("threshold"), thresholdText: $("threshold-text"),
 };
 
@@ -59,7 +88,7 @@ function applyStatus(status) {
     const chip = document.createElement("span");
     chip.className = "chip";
     chip.dataset.sign = name;
-    chip.textContent = name;
+    chip.textContent = displayLabel(name);
     return chip;
   }));
   el.classCount.textContent = status.model_loaded ? `${status.classes.length} trained` : "planned";
@@ -105,7 +134,7 @@ async function listCameras(activeId) {
 async function startCamera(deviceId) {
   el.cameraError.textContent = "";
   stopCamera();
-  const video = { width: { ideal: 1280 }, height: { ideal: 720 } };
+  const video = { width: { ideal: 640 }, height: { ideal: 480 } };
   if (deviceId) video.deviceId = { exact: deviceId };
 
   try {
@@ -210,16 +239,14 @@ function drawHands(hands) {
   const lineWidth = Math.max(2, width / 260);
 
   for (const hand of hands) {
-    const pts = hand.points.map(([x, y]) => [x * width, y * height]);
+    // The server flips the frame so the model sees the same selfie view it
+    // was trained on. The preview is the raw camera, so undo that flip here.
+    const pts = hand.points.map(([x, y]) => [(1 - x) * width, y * height]);
 
-    const gradient = overlayCtx.createLinearGradient(0, 0, width, height);
-    gradient.addColorStop(0, "#e8d35a");
-    gradient.addColorStop(1, "#bdc59a");
-    overlayCtx.strokeStyle = gradient;
+    overlayCtx.strokeStyle = "#8fb56a";
     overlayCtx.lineWidth = lineWidth;
     overlayCtx.lineCap = "round";
-    overlayCtx.shadowColor = "rgba(232, 211, 90, 0.75)";
-    overlayCtx.shadowBlur = 12;
+    overlayCtx.shadowBlur = 0;
     overlayCtx.beginPath();
     for (const [a, b] of HAND_CONNECTIONS) {
       overlayCtx.moveTo(...pts[a]);
@@ -227,7 +254,6 @@ function drawHands(hands) {
     }
     overlayCtx.stroke();
 
-    overlayCtx.shadowBlur = 0;
     pts.forEach(([x, y], index) => {
       const radius = lineWidth * (FINGERTIPS.has(index) ? 2.2 : 1.5);
       overlayCtx.beginPath();
@@ -240,20 +266,21 @@ function drawHands(hands) {
 
 function showPrediction({ hands, sign, confidence }, idle = false) {
   const hasHand = hands.length > 0;
-  const recognized = hasHand && sign !== UNKNOWN;
+  const recognized = Boolean(sign) && sign !== UNKNOWN;
 
   let label;
   if (idle) label = "Waiting";
+  else if (recognized) label = displayLabel(sign);
   else if (!hasHand) label = "No hand";
   else if (!state.modelLoaded) label = "Tracking";
-  else label = recognized ? sign : "Unknown";
+  else label = "Unknown";
 
   el.bigSign.textContent = label;
   el.bigSign.className = "big-sign" + (recognized ? " recognized" : !hasHand ? " idle" : "");
   el.bannerSign.textContent = label;
   el.banner.classList.toggle("recognized", recognized);
 
-  const shown = hasHand && state.modelLoaded ? confidence : 0;
+  const shown = recognized ? confidence : 0;
   el.meterFill.style.width = `${Math.round(shown * 100)}%`;
   el.confidenceText.textContent = `${Math.round(shown * 100)}%`;
 
@@ -286,41 +313,72 @@ function trackTranscript(sign) {
   }
 }
 
+function formatSentence(labels) {
+  const phrases = labels.map(displayLabel).filter(Boolean);
+  if (!phrases.length) return "";
+  const rest = phrases.slice(1).map((part) => part.charAt(0).toLowerCase() + part.slice(1));
+  return [phrases[0], ...rest].join(", ");
+}
+
+function renderSentence() {
+  el.sentenceLine.textContent = formatSentence(state.words);
+}
+
 function addWord(sign) {
   if (!state.words.length) el.transcript.replaceChildren();
   state.words.push(sign);
   const word = document.createElement("span");
   word.className = "word";
-  word.textContent = sign;
+  word.textContent = displayLabel(sign);
   el.transcript.appendChild(word);
-  el.transcript.scrollTop = el.transcript.scrollHeight;
-
-  if (el.speakToggle.checked && "speechSynthesis" in window) {
-    speechSynthesis.speak(new SpeechSynthesisUtterance(sign));
-  }
+  renderSentence();
+  el.transcribeStatus.textContent = "Press Enter to transcribe the sentence.";
 }
 
 function clearTranscript() {
   state.words = [];
   state.lastCommitted = null;
+  state.candidate = null;
+  state.candidateCount = 0;
   const empty = document.createElement("span");
   empty.className = "muted";
-  empty.textContent = "Recognized signs will sprout here.";
+  empty.textContent = "Words you hold will gather here.";
   el.transcript.replaceChildren(empty);
+  renderSentence();
+  el.transcribeStatus.textContent = "Press Enter to transcribe the sentence.";
+  if ("speechSynthesis" in window) speechSynthesis.cancel();
+}
+
+function transcribeSentence() {
+  const sentence = formatSentence(state.words);
+  if (!sentence) {
+    el.transcribeStatus.textContent = "Sign a few words first.";
+    return;
+  }
+  if ("speechSynthesis" in window) {
+    speechSynthesis.cancel();
+    speechSynthesis.speak(new SpeechSynthesisUtterance(sentence));
+  }
+  el.transcribeStatus.textContent = `Transcribed: ${sentence}`;
 }
 
 // ---------- Wiring ----------
 
 el.startBtn.addEventListener("click", () => startCamera());
-$("hero-start").addEventListener("click", () => {
-  $("app").scrollIntoView({ behavior: "smooth" });
-  if (!state.running) startCamera();
-});
 el.stopBtn.addEventListener("click", stopCamera);
 el.cameraSelect.addEventListener("change", () => startCamera(el.cameraSelect.value));
 el.reloadBtn.addEventListener("click", () => loadStatus("/api/reload", "POST"));
 el.clearBtn.addEventListener("click", clearTranscript);
+el.transcribeBtn.addEventListener("click", transcribeSentence);
 el.threshold.addEventListener("input", updateThresholdLabel);
+
+document.addEventListener("keydown", (event) => {
+  if (event.key !== "Enter" || event.repeat || event.shiftKey) return;
+  const tag = document.activeElement && document.activeElement.tagName;
+  if (tag === "INPUT" || tag === "SELECT" || tag === "BUTTON") return;
+  event.preventDefault();
+  transcribeSentence();
+});
 
 if (!navigator.mediaDevices?.getUserMedia) {
   el.startBtn.disabled = true;

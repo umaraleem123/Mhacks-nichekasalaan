@@ -14,8 +14,9 @@ from __future__ import annotations
 import argparse
 import sys
 import threading
+import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import cv2
 import numpy as np
@@ -34,6 +35,73 @@ from src.vision.hand_tracker import HandTracker, HandTrackerError
 
 MAX_FRAME_BYTES = 4 * 1024 * 1024
 UNKNOWN_SIGN = "unknown"
+TRACK_MAX_WIDTH = 480
+
+
+class SignHold:
+    """Stop the banner flipping between a sign and unknown.
+
+    A label is shown only after it wins several inferences in a row. Once it
+    is showing, it stays up for `hold_seconds` after the model disagrees.
+    Frames that skip inference leave the banner alone.
+    """
+
+    def __init__(
+        self,
+        min_hits: int = 3,
+        hold_seconds: float = 1.0,
+        clock: Callable[[], float] | None = None,
+    ) -> None:
+        self.min_hits = min_hits
+        self.hold_seconds = hold_seconds
+        self._clock = clock or time.perf_counter
+        self.sign = UNKNOWN_SIGN
+        self.confidence = 0.0
+        self._pending: str | None = None
+        self._hits = 0
+        self._hold_until = 0.0
+
+    def update(
+        self,
+        observed: str | None,
+        confidence: float,
+        *,
+        inferred: bool,
+    ) -> str:
+        if not inferred:
+            return self.sign
+        now = self._clock()
+        if observed and observed != UNKNOWN_SIGN:
+            if observed == self._pending:
+                self._hits += 1
+            else:
+                self._pending = observed
+                self._hits = 1
+            stable = self._hits >= self.min_hits or observed == self.sign
+            if stable and (observed == self.sign or self._hits >= self.min_hits):
+                self.sign = observed
+                self.confidence = confidence
+                self._hold_until = now + self.hold_seconds
+            return self.sign
+        self._pending = None
+        self._hits = 0
+        if now >= self._hold_until:
+            self.sign = UNKNOWN_SIGN
+            self.confidence = 0.0
+        return self.sign
+
+
+def shrink_for_tracking(frame: np.ndarray, max_width: int = TRACK_MAX_WIDTH) -> np.ndarray:
+    """Downscale a webcam frame before MediaPipe. Landmarks stay in 0–1 space."""
+    height, width = frame.shape[:2]
+    if width <= max_width:
+        return frame
+    scale = max_width / float(width)
+    return cv2.resize(
+        frame,
+        (max_width, max(1, int(round(height * scale)))),
+        interpolation=cv2.INTER_AREA,
+    )
 
 
 class SequenceModelError(RuntimeError):
@@ -59,6 +127,7 @@ class RecognitionService:
         self._tracker = HandTracker(max_hands=2)
         self._recognizer: LiveSequenceRecognizer | None = None
         self._session: RecognitionSession | None = None
+        self._hold = SignHold()
         self.model_error: str | None = None
         self.reload_model()
 
@@ -69,6 +138,7 @@ class RecognitionService:
                 self._session = RecognitionSession(
                     self._recognizer, settings=self._settings
                 )
+                self._hold = SignHold()
                 self.model_error = None
                 self._classes = classes
             except SequenceModelError as exc:
@@ -111,7 +181,7 @@ class RecognitionService:
         frame = cv2.imdecode(np.frombuffer(jpeg, dtype=np.uint8), cv2.IMREAD_COLOR)
         if frame is None:
             raise ValueError("Could not decode the frame as an image.")
-        frame = cv2.flip(frame, 1)
+        frame = shrink_for_tracking(cv2.flip(frame, 1))
 
         with self._lock:
             hands = self._tracker.process(frame)
@@ -124,9 +194,22 @@ class RecognitionService:
                 session.push_positions(positions_from_hands(hands))
                 prediction = session.maybe_infer()
                 session.poll()
-                confidence = float(session.confidence)
+                inferred = prediction is not None or str(session.status).startswith(
+                    "WAITING"
+                )
                 if prediction is not None and prediction.label:
-                    sign = prediction.label
+                    observed: str | None = prediction.label
+                    observed_confidence = float(prediction.confidence)
+                elif inferred:
+                    observed = UNKNOWN_SIGN
+                    observed_confidence = 0.0
+                else:
+                    observed = None
+                    observed_confidence = float(session.confidence)
+                sign = self._hold.update(
+                    observed, observed_confidence, inferred=inferred
+                )
+                confidence = self._hold.confidence if sign != UNKNOWN_SIGN else 0.0
 
         return {
             "hands": [
