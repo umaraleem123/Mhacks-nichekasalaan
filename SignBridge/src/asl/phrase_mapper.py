@@ -30,6 +30,9 @@ PHRASE_BY_LABEL: dict[str, str] = {
     "name": "Name",
     "goodbye": "Goodbye",
     "nice_to_meet_you": "Nice to meet you",
+    "do": "Do",
+    "can": "Can",
+    "okay": "Okay",
 }
 
 
