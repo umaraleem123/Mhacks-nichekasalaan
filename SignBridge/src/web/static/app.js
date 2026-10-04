@@ -25,6 +25,10 @@ const PHRASES = {
   where: "Where",
   name: "Name",
   goodbye: "Goodbye",
+  nice_to_meet_you: "Nice to meet you",
+  do: "Do",
+  can: "Can",
+  okay: "Okay",
 };
 
 function displayLabel(name) {
@@ -100,13 +104,38 @@ function applyStatus(status) {
   }
 }
 
+function showOffline() {
+  el.pill.className = "pill pill-warn";
+  el.pillText.textContent = "Runs on your computer";
+  el.noModel.hidden = false;
+  const title = el.noModel.querySelector("h3");
+  const copy = el.noModel.querySelector("p");
+  const command = el.noModel.querySelector("pre");
+  if (title) title.textContent = "Recognition stays local";
+  if (copy) {
+    copy.textContent = "This public page is the Signify interface. The camera model runs on your machine. From the SignBridge folder:";
+  }
+  if (command) command.textContent = "python -m src.web.server";
+  if (el.reloadBtn) el.reloadBtn.hidden = true;
+
+  const names = Object.keys(PHRASES).sort();
+  el.chips.replaceChildren(...names.map((name) => {
+    const chip = document.createElement("span");
+    chip.className = "chip";
+    chip.dataset.sign = name;
+    chip.textContent = displayLabel(name);
+    return chip;
+  }));
+  el.classCount.textContent = `${names.length} signs`;
+}
+
 async function loadStatus(path = "/api/status", method = "GET") {
   try {
     const response = await fetch(path, { method });
+    if (!response.ok) throw new Error("status failed");
     applyStatus(await response.json());
   } catch {
-    el.pill.className = "pill pill-bad";
-    el.pillText.textContent = "Server unreachable";
+    showOffline();
   }
 }
 
@@ -200,8 +229,13 @@ async function loop() {
         headers: { "Content-Type": "image/jpeg" },
         body: blob,
       });
-      const result = await response.json();
+      const result = await response.json().catch(() => ({}));
       if (!state.running) break;
+      if (response.status === 404) {
+        showOffline();
+        stopCamera();
+        break;
+      }
       if (!response.ok) throw new Error(result.error || response.statusText);
 
       if (result.model_loaded !== state.modelLoaded) loadStatus();

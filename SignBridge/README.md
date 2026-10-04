@@ -171,7 +171,9 @@ python -m src.web.server
 ```
 
 Then open [http://127.0.0.1:5000](http://127.0.0.1:5000) and click
-**Start camera**. The page shows the live feed with landmarks, the predicted
+**Start camera**. The same interface is published at
+[umaraleem123.github.io/Mhacks-nichekasalaan](https://umaraleem123.github.io/Mhacks-nichekasalaan/).
+GitHub Pages only serves the page. Recognition still runs on your computer. The page shows the live feed with landmarks, the predicted
 sign and confidence, a transcript of recognized signs (optionally read aloud),
 and a sensitivity slider. The browser captures the webcam and posts frames to
 the local server.
