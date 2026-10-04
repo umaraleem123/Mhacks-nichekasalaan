@@ -187,7 +187,7 @@ Options: `--host`, `--port`, `--model`. Browsers only allow webcam access on
 
 ```
 ELEVENLABS_API_KEY=...
-ELEVENLABS_VOICE_ID=21m00Tcm4TlvDq8ikWAM
+ELEVENLABS_VOICE_ID=rWZM1pGWKmpGt3Hvergd
 ```
 
 If the key is missing or a request fails, the English translation still

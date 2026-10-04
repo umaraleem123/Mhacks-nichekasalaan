@@ -20,7 +20,7 @@ from typing import Any, Callable
 
 import cv2
 import numpy as np
-from flask import Flask, jsonify, render_template, request
+from flask import Flask, Response, jsonify, render_template, request
 
 from src import SEQUENCE_LABELS_PATH, SEQUENCE_MODEL_PATH
 from src.asl import SIGNS
@@ -31,6 +31,7 @@ from src.asl.sequence_recognition import (
     RecognitionSession,
     demo_settings,
 )
+from src.speech.text_to_speech import TextToSpeech
 from src.vision.hand_tracker import HandTracker, HandTrackerError
 
 MAX_FRAME_BYTES = 4 * 1024 * 1024
@@ -245,6 +246,16 @@ def create_app(service: RecognitionService) -> Flask:
     def reload_model():
         service.reload_model()
         return jsonify(service.status())
+
+    @app.post("/api/speak")
+    def speak():
+        payload = request.get_json(silent=True) or {}
+        text = payload.get("text", "") if isinstance(payload, dict) else ""
+        tts = TextToSpeech.from_env()
+        wav = tts.synthesize_wav(str(text))
+        if wav is None:
+            return jsonify({"error": tts.last_error or "Speech failed."}), 400
+        return Response(wav, mimetype="audio/wav")
 
     @app.post("/api/frame")
     def frame():

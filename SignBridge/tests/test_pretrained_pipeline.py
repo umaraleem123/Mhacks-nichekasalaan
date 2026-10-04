@@ -377,6 +377,32 @@ class DemoAndSpeechTests(unittest.TestCase):
         self.assertEqual(clean_text(""), "")
         self.assertEqual(clean_text("Hello   there"), "Hello there")
 
+    def test_default_voice_id_is_current(self) -> None:
+        from src.speech.text_to_speech import DEFAULT_VOICE_ID
+
+        self.assertEqual(DEFAULT_VOICE_ID, "rWZM1pGWKmpGt3Hvergd")
+
+    def test_load_local_env_overwrites_existing_voice_id(self) -> None:
+        from src.speech.text_to_speech import load_local_env
+
+        root = Path(tempfile.mkdtemp())
+        (root / ".env").write_text(
+            "ELEVENLABS_VOICE_ID=rWZM1pGWKmpGt3Hvergd\n",
+            encoding="utf-8",
+        )
+        with patch.dict(os.environ, {"ELEVENLABS_VOICE_ID": "old-voice"}, clear=False):
+            load_local_env(root)
+            self.assertEqual(os.environ["ELEVENLABS_VOICE_ID"], "rWZM1pGWKmpGt3Hvergd")
+
+    def test_synthesize_wav_wraps_pcm(self) -> None:
+        tts = TextToSpeech(api_key="test-key", voice_id="voice")
+        pcm = (np.zeros(22050, dtype=np.int16)).tobytes()
+        with patch.object(TextToSpeech, "_synthesize", return_value=pcm):
+            wav = tts.synthesize_wav("Hello")
+        self.assertIsNotNone(wav)
+        self.assertTrue((wav or b"").startswith(b"RIFF"))
+        self.assertEqual(tts.last_backend, "elevenlabs")
+
 
 if __name__ == "__main__":
     unittest.main()

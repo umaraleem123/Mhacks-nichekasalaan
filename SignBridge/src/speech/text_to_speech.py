@@ -15,10 +15,12 @@ blocks until the utterance finishes.
 
 from __future__ import annotations
 
+import io
 import json
 import os
 import urllib.error
 import urllib.request
+import wave
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -29,7 +31,7 @@ API_KEY_ENV = "ELEVENLABS_API_KEY"
 VOICE_ID_ENV = "ELEVENLABS_VOICE_ID"
 MODEL_ENV = "ELEVENLABS_MODEL_ID"
 DEFAULT_MODEL_ID = "eleven_turbo_v2_5"
-DEFAULT_VOICE_ID = "21m00Tcm4TlvDq8ikWAM"  # public ElevenLabs "Rachel" voice
+DEFAULT_VOICE_ID = "rWZM1pGWKmpGt3Hvergd"
 DEFAULT_SAMPLE_RATE = 22050
 DEFAULT_TIMEOUT_SECONDS = 20.0
 TTS_URL = "https://api.elevenlabs.io/v1/text-to-speech/{voice_id}"
@@ -58,7 +60,7 @@ def clean_text(text: object) -> str:
 
 
 def load_local_env(root: Path | None = None) -> None:
-    """Load SignBridge/.env into os.environ without overwriting existing keys.
+    """Load SignBridge/.env into os.environ, overwriting matching keys.
 
     `.env` is gitignored. This helper never prints values.
     """
@@ -72,7 +74,7 @@ def load_local_env(root: Path | None = None) -> None:
         key, _, value = line.partition("=")
         key = key.strip()
         value = value.strip().strip("'").strip('"')
-        if key and key not in os.environ:
+        if key:
             os.environ[key] = value
 
 
@@ -127,15 +129,47 @@ class TextToSpeech:
             self.last_error = f"{API_KEY_ENV} is not set."
             return False
 
+        wav = self.synthesize_wav(spoken)
+        if wav is None:
+            return False
         try:
-            pcm = self._synthesize(spoken)
-            self._play_pcm16(pcm, self.config.sample_rate)
+            self._play_pcm16(self._wav_pcm(wav), self.config.sample_rate)
         except Exception as exc:
             self.last_error = f"{type(exc).__name__}: {exc}"
             return False
 
         self.last_backend = "elevenlabs"
         return True
+
+    def synthesize_wav(self, text: str) -> bytes | None:
+        """Return a WAV file for `text`, or None. Does not play audio."""
+        spoken = clean_text(text)
+        self.last_error = None
+        self.last_backend = None
+        if not spoken:
+            self.last_error = "Nothing to speak."
+            return None
+        if not self.api_key:
+            self.last_error = f"{API_KEY_ENV} is not set."
+            return None
+        try:
+            pcm = self._synthesize(spoken)
+            buffer = io.BytesIO()
+            with wave.open(buffer, "wb") as wav:
+                wav.setnchannels(1)
+                wav.setsampwidth(2)
+                wav.setframerate(self.config.sample_rate)
+                wav.writeframes(pcm)
+            self.last_backend = "elevenlabs"
+            return buffer.getvalue()
+        except Exception as exc:
+            self.last_error = f"{type(exc).__name__}: {exc}"
+            return None
+
+    @staticmethod
+    def _wav_pcm(wav_bytes: bytes) -> bytes:
+        with wave.open(io.BytesIO(wav_bytes), "rb") as wav:
+            return wav.readframes(wav.getnframes())
 
     def _synthesize(self, text: str) -> bytes:
         """POST text to ElevenLabs and return 16-bit mono PCM."""

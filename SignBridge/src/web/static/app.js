@@ -346,20 +346,45 @@ function clearTranscript() {
   el.transcript.replaceChildren(empty);
   renderSentence();
   el.transcribeStatus.textContent = "Press Enter to transcribe the sentence.";
-  if ("speechSynthesis" in window) speechSynthesis.cancel();
+  if (window._signifyAudio) {
+    window._signifyAudio.pause();
+    window._signifyAudio.src = "";
+  }
 }
 
-function transcribeSentence() {
+async function transcribeSentence() {
   const sentence = formatSentence(state.words);
   if (!sentence) {
     el.transcribeStatus.textContent = "Sign a few words first.";
     return;
   }
-  if ("speechSynthesis" in window) {
-    speechSynthesis.cancel();
-    speechSynthesis.speak(new SpeechSynthesisUtterance(sentence));
+  el.transcribeStatus.textContent = "Speaking…";
+  try {
+    const response = await fetch("/api/speak", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text: sentence }),
+    });
+    if (!response.ok) {
+      const body = await response.json().catch(() => ({}));
+      el.transcribeStatus.textContent = body.error || "Speech failed.";
+      return;
+    }
+    const blob = await response.blob();
+    const url = URL.createObjectURL(blob);
+    if (window._signifyAudio) {
+      window._signifyAudio.pause();
+      if (window._signifyAudioUrl) URL.revokeObjectURL(window._signifyAudioUrl);
+    }
+    const audio = new Audio(url);
+    window._signifyAudio = audio;
+    window._signifyAudioUrl = url;
+    audio.onended = () => URL.revokeObjectURL(url);
+    await audio.play();
+    el.transcribeStatus.textContent = `Transcribed: ${sentence}`;
+  } catch {
+    el.transcribeStatus.textContent = "Speech failed.";
   }
-  el.transcribeStatus.textContent = `Transcribed: ${sentence}`;
 }
 
 // ---------- Wiring ----------

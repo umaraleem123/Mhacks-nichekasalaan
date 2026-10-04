@@ -12,7 +12,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from src.web.server import UNKNOWN_SIGN, RecognitionService, SignHold
+from src.web.server import UNKNOWN_SIGN, RecognitionService, SignHold, create_app
 
 
 class WebServerModelTests(unittest.TestCase):
@@ -43,6 +43,45 @@ class WebServerModelTests(unittest.TestCase):
         self.assertTrue(status["model_loaded"])
         self.assertEqual(status["classes"], ["hello", "goodbye"])
         self.assertIsNone(status["error"])
+
+
+class SpeakEndpointTests(unittest.TestCase):
+    def test_speak_returns_elevenlabs_wav(self) -> None:
+        handle = tempfile.NamedTemporaryFile(suffix=".pt", delete=False)
+        path = Path(handle.name)
+        handle.close()
+        self.addCleanup(path.unlink)
+        fake_wav = b"RIFF....WAVE"
+        tts = MagicMock()
+        tts.synthesize_wav.return_value = fake_wav
+        tts.last_error = None
+        with patch("src.web.server.HandTracker"):
+            with patch(
+                "src.web.server.load_sequence_model",
+                return_value=(MagicMock(), ["hello"], {}),
+            ):
+                service = RecognitionService(model_path=path, labels_path=path)
+        app = create_app(service)
+        with patch("src.web.server.TextToSpeech.from_env", return_value=tts):
+            response = app.test_client().post("/api/speak", json={"text": "Hello"})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.mimetype, "audio/wav")
+        self.assertEqual(response.data, fake_wav)
+        tts.synthesize_wav.assert_called_once_with("Hello")
+
+    def test_legacy_elevenlabs_voice_id_is_not_in_source(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        forbidden = "Tcm4TlvDq8ikWAM"
+        scanned = list((root / "src").rglob("*"))
+        scanned += [root / "README.md", root / ".env.example"]
+        hits = []
+        for path in scanned:
+            if not path.is_file() or path.suffix not in {".py", ".js", ".html", ".md", ".example", ".txt"}:
+                continue
+            text = path.read_text(encoding="utf-8", errors="ignore")
+            if forbidden in text or "speechSynthesis" in text:
+                hits.append(str(path))
+        self.assertEqual(hits, [])
 
 
 class SignHoldTests(unittest.TestCase):
