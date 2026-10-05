@@ -12,6 +12,7 @@ frames here. This server runs the same temporal BiGRU path as
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 import threading
 import time
@@ -36,7 +37,21 @@ from src.vision.hand_tracker import HandTracker, HandTrackerError
 
 MAX_FRAME_BYTES = 4 * 1024 * 1024
 UNKNOWN_SIGN = "unknown"
-TRACK_MAX_WIDTH = 320
+TRACK_MAX_WIDTH = 256
+
+
+def web_settings() -> dict[str, Any]:
+    """Live web UI settings — a bit less strict than the desktop demo defaults."""
+    settings = demo_settings()
+    # Only soften the threshold when the user has not set an explicit override.
+    if "SIGNBRIDGE_CONFIDENCE_THRESHOLD" not in os.environ:
+        settings["threshold"] = min(float(settings["threshold"]), 0.70)
+    settings["window"] = 3
+    settings["min_agree"] = 2
+    settings["motion"] = min(float(settings["motion"]), 0.010)
+    settings["inference_hz"] = max(float(settings["inference_hz"]), 8.0)
+    settings["cooldown"] = min(float(settings["cooldown"]), 1.0)
+    return settings
 
 
 class _LandmarkPoint:
@@ -182,11 +197,11 @@ class RecognitionService:
         self._lock = threading.Lock()
         self._model_path = Path(model_path) if model_path else SEQUENCE_MODEL_PATH
         self._labels_path = Path(labels_path) if labels_path else SEQUENCE_LABELS_PATH
-        self._settings = demo_settings()
+        self._settings = web_settings()
         self._tracker = HandTracker(max_hands=2)
         self._recognizer: LiveSequenceRecognizer | None = None
         self._session: RecognitionSession | None = None
-        self._hold = SignHold()
+        self._hold = SignHold(min_hits=2, hold_seconds=1.2)
         self.model_error: str | None = None
         self.reload_model()
 
@@ -197,7 +212,7 @@ class RecognitionService:
                 self._session = RecognitionSession(
                     self._recognizer, settings=self._settings
                 )
-                self._hold = SignHold()
+                self._hold = SignHold(min_hits=2, hold_seconds=1.2)
                 self.model_error = None
                 self._classes = classes
             except SequenceModelError as exc:
@@ -334,7 +349,7 @@ def create_app(service: RecognitionService) -> Flask:
     @app.post("/api/frame")
     def frame():
         threshold = request.args.get(
-            "threshold", float(demo_settings()["threshold"]), type=float
+            "threshold", float(web_settings()["threshold"]), type=float
         )
         threshold = min(max(threshold, 0.0), 1.0)
         try:

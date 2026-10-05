@@ -1,10 +1,10 @@
 "use strict";
 
-const CAPTURE_WIDTH = 320;
-const JPEG_QUALITY = 0.5;
-const STABLE_FRAMES = 6;
+const CAPTURE_WIDTH = 256;
+const JPEG_QUALITY = 0.45;
+const STABLE_FRAMES = 2;
 const UNKNOWN = "unknown";
-const HANDS_CDN = "https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1675469240";
+const HANDS_BASE = "/static/vendor/hands";
 const PHRASES = {
   hello: "Hello",
   yes: "Yes",
@@ -76,6 +76,8 @@ const state = {
   lastSign: UNKNOWN,
   lastConfidence: 0,
   latestHandsResults: null,
+  pendingHands: null,
+  recognizeInFlight: false,
 };
 
 const captureCanvas = document.createElement("canvas");
@@ -185,10 +187,10 @@ function loadScript(src) {
 async function ensureBrowserHands() {
   if (state.hands) return true;
   try {
-    await loadScript(`${HANDS_CDN}/hands.js`);
+    await loadScript(`${HANDS_BASE}/hands.js`);
     if (typeof Hands !== "function") return false;
     const hands = new Hands({
-      locateFile: (file) => `${HANDS_CDN}/${file}`,
+      locateFile: (file) => `${HANDS_BASE}/${file}`,
     });
     hands.setOptions({
       maxNumHands: 2,
@@ -199,6 +201,9 @@ async function ensureBrowserHands() {
     hands.onResults((results) => {
       state.latestHandsResults = results;
     });
+    if (typeof hands.initialize === "function") {
+      await hands.initialize();
+    }
     state.hands = hands;
     return true;
   } catch (error) {
@@ -342,26 +347,58 @@ async function recognizeHands(hands, started) {
   return result;
 }
 
+async function flushRecognize() {
+  if (state.recognizeInFlight) return;
+  state.recognizeInFlight = true;
+  try {
+    while (state.running && state.pendingHands) {
+      const job = state.pendingHands;
+      state.pendingHands = null;
+      const result = await recognizeHands(job.hands, job.started);
+      if (!state.running || result == null) break;
+      showPrediction({
+        hands: job.overlay,
+        sign: state.lastSign,
+        confidence: state.lastConfidence,
+      });
+    }
+  } catch (error) {
+    el.pill.className = "pill pill-bad";
+    el.pillText.textContent = "Server error";
+    console.error(error);
+  } finally {
+    state.recognizeInFlight = false;
+    if (state.running && state.pendingHands) flushRecognize();
+  }
+}
+
+function queueRecognize(hands, overlay) {
+  state.pendingHands = {
+    hands,
+    overlay,
+    started: performance.now(),
+  };
+  flushRecognize();
+}
+
 async function loopBrowserHands() {
   while (state.running) {
     if (!el.video.videoWidth) {
       await new Promise((resolve) => requestAnimationFrame(resolve));
       continue;
     }
-    const started = performance.now();
     try {
       drawMirroredVideo();
       await state.hands.send({ image: captureCanvas });
       const hands = handsFromMediaPipe(state.latestHandsResults || {});
       const overlay = overlayHandsFromPayload(hands);
       drawHands(overlay);
-      await recognizeHands(hands, started);
-      if (!state.running) break;
       showPrediction({
         hands: overlay,
         sign: state.lastSign,
         confidence: state.lastConfidence,
       });
+      queueRecognize(hands, overlay);
       tickFps();
     } catch (error) {
       console.error(error);
@@ -369,6 +406,7 @@ async function loopBrowserHands() {
       state.useBrowserHands = false;
       break;
     }
+    await new Promise((resolve) => requestAnimationFrame(resolve));
   }
   if (state.running && !state.useBrowserHands) await loopJpegFallback();
 }
@@ -400,13 +438,13 @@ async function loopJpegFallback() {
       drawHands(result.hands);
       showPrediction(result);
       el.latency.textContent = `${Math.round(performance.now() - started)} ms`;
+      tickFps();
     } catch (error) {
       el.pill.className = "pill pill-bad";
       el.pillText.textContent = "Server error";
       console.error(error);
-      await new Promise((resolve) => setTimeout(resolve, 1000));
+      await new Promise((resolve) => setTimeout(resolve, 250));
     }
-    tickFps();
   }
 }
 
