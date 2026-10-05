@@ -12,7 +12,13 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from src.web.server import UNKNOWN_SIGN, RecognitionService, SignHold, create_app
+from src.web.server import (
+    UNKNOWN_SIGN,
+    RecognitionService,
+    SignHold,
+    create_app,
+    hands_from_payload,
+)
 
 
 class WebServerModelTests(unittest.TestCase):
@@ -99,6 +105,39 @@ class SignHoldTests(unittest.TestCase):
 
         now["t"] = 1.5
         self.assertEqual(hold.update(UNKNOWN_SIGN, 0.0, inferred=True), UNKNOWN_SIGN)
+
+
+class LandmarkPayloadTests(unittest.TestCase):
+    def test_hands_from_payload_requires_21_points(self) -> None:
+        with self.assertRaises(ValueError):
+            hands_from_payload([{"label": "Left", "confidence": 0.9, "points": [[0, 0]]}])
+
+    def test_frame_json_landmarks_skip_jpeg_path(self) -> None:
+        handle = tempfile.NamedTemporaryFile(suffix=".pt", delete=False)
+        path = Path(handle.name)
+        handle.close()
+        self.addCleanup(path.unlink)
+        points = [[0.1 * (i % 5), 0.2 * (i % 4), 0.0] for i in range(21)]
+        with patch("src.web.server.HandTracker") as tracker_cls:
+            with patch(
+                "src.web.server.load_sequence_model",
+                return_value=(MagicMock(), ["hello"], {}),
+            ):
+                service = RecognitionService(model_path=path, labels_path=path)
+        tracker_cls.return_value.process.assert_not_called()
+        app = create_app(service)
+        response = app.test_client().post(
+            "/api/frame?threshold=0.8",
+            json={"hands": [{"label": "Right", "confidence": 0.95, "points": points}]},
+        )
+        self.assertEqual(response.status_code, 200)
+        body = response.get_json()
+        self.assertIn("sign", body)
+        self.assertIn("hands", body)
+        self.assertEqual(len(body["hands"]), 1)
+        self.assertEqual(body["hands"][0]["label"], "Right")
+        # JSON landmark path must not touch the MediaPipe tracker.
+        service._tracker.process.assert_not_called()
 
 
 if __name__ == "__main__":
