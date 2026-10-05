@@ -36,7 +36,65 @@ from src.vision.hand_tracker import HandTracker, HandTrackerError
 
 MAX_FRAME_BYTES = 4 * 1024 * 1024
 UNKNOWN_SIGN = "unknown"
-TRACK_MAX_WIDTH = 480
+TRACK_MAX_WIDTH = 320
+
+
+class _LandmarkPoint:
+    """Minimal stand-in for a MediaPipe landmark (x, y, z)."""
+
+    __slots__ = ("x", "y", "z")
+
+    def __init__(self, x: float, y: float, z: float = 0.0) -> None:
+        self.x = float(x)
+        self.y = float(y)
+        self.z = float(z)
+
+
+class _LandmarkList:
+    __slots__ = ("landmark",)
+
+    def __init__(self, points: list[_LandmarkPoint]) -> None:
+        self.landmark = points
+
+
+class _PayloadHand:
+    """DetectedHand-compatible object built from a browser JSON payload."""
+
+    __slots__ = ("label", "confidence", "landmarks")
+
+    def __init__(self, label: str, confidence: float, points: list[list[float]]) -> None:
+        self.label = label
+        self.confidence = float(confidence)
+        self.landmarks = _LandmarkList(
+            [
+                _LandmarkPoint(
+                    point[0],
+                    point[1],
+                    point[2] if len(point) > 2 else 0.0,
+                )
+                for point in points
+            ]
+        )
+
+    def points(self) -> list[tuple[float, float, float]]:
+        return [(lm.x, lm.y, lm.z) for lm in self.landmarks.landmark]
+
+
+def hands_from_payload(payload: Any) -> list[_PayloadHand]:
+    """Parse browser landmark JSON into tracker-compatible hand objects."""
+    if not isinstance(payload, list):
+        raise ValueError("hands must be a list.")
+    hands: list[_PayloadHand] = []
+    for item in payload:
+        if not isinstance(item, dict):
+            raise ValueError("Each hand must be an object.")
+        points = item.get("points")
+        if not isinstance(points, list) or len(points) != 21:
+            raise ValueError("Each hand needs exactly 21 landmark points.")
+        label = str(item.get("label") or "Unknown")
+        confidence = float(item.get("confidence") or 0.0)
+        hands.append(_PayloadHand(label, confidence, points))
+    return hands
 
 
 class SignHold:
@@ -178,40 +236,38 @@ class RecognitionService:
             "error": self.model_error,
         }
 
-    def process(self, jpeg: bytes, threshold: float) -> dict[str, Any]:
-        frame = cv2.imdecode(np.frombuffer(jpeg, dtype=np.uint8), cv2.IMREAD_COLOR)
-        if frame is None:
-            raise ValueError("Could not decode the frame as an image.")
-        frame = shrink_for_tracking(cv2.flip(frame, 1))
+    def _recognize(
+        self,
+        hands: list[Any],
+        threshold: float,
+    ) -> tuple[str, float]:
+        """Update the temporal buffer and return the held sign label."""
+        sign, confidence = UNKNOWN_SIGN, 0.0
+        session = self._session
+        recognizer = self._recognizer
+        if session is None or recognizer is None:
+            return sign, confidence
 
-        with self._lock:
-            hands = self._tracker.process(frame)
-            sign, confidence = UNKNOWN_SIGN, 0.0
-            session = self._session
-            recognizer = self._recognizer
-            if session is not None and recognizer is not None:
-                recognizer.threshold = threshold
-                session.smoother.threshold = threshold
-                session.push_positions(positions_from_hands(hands))
-                prediction = session.maybe_infer()
-                session.poll()
-                inferred = prediction is not None or str(session.status).startswith(
-                    "WAITING"
-                )
-                if prediction is not None and prediction.label:
-                    observed: str | None = prediction.label
-                    observed_confidence = float(prediction.confidence)
-                elif inferred:
-                    observed = UNKNOWN_SIGN
-                    observed_confidence = 0.0
-                else:
-                    observed = None
-                    observed_confidence = float(session.confidence)
-                sign = self._hold.update(
-                    observed, observed_confidence, inferred=inferred
-                )
-                confidence = self._hold.confidence if sign != UNKNOWN_SIGN else 0.0
+        recognizer.threshold = threshold
+        session.smoother.threshold = threshold
+        session.push_positions(positions_from_hands(hands))
+        prediction = session.maybe_infer()
+        session.poll()
+        inferred = prediction is not None or str(session.status).startswith("WAITING")
+        if prediction is not None and prediction.label:
+            observed: str | None = prediction.label
+            observed_confidence = float(prediction.confidence)
+        elif inferred:
+            observed = UNKNOWN_SIGN
+            observed_confidence = 0.0
+        else:
+            observed = None
+            observed_confidence = float(session.confidence)
+        sign = self._hold.update(observed, observed_confidence, inferred=inferred)
+        confidence = self._hold.confidence if sign != UNKNOWN_SIGN else 0.0
+        return sign, confidence
 
+    def _response(self, hands: list[Any], sign: str, confidence: float) -> dict[str, Any]:
         return {
             "hands": [
                 {
@@ -225,6 +281,24 @@ class RecognitionService:
             "confidence": confidence,
             "model_loaded": self._recognizer is not None,
         }
+
+    def process(self, jpeg: bytes, threshold: float) -> dict[str, Any]:
+        frame = cv2.imdecode(np.frombuffer(jpeg, dtype=np.uint8), cv2.IMREAD_COLOR)
+        if frame is None:
+            raise ValueError("Could not decode the frame as an image.")
+        frame = shrink_for_tracking(cv2.flip(frame, 1))
+
+        with self._lock:
+            hands = self._tracker.process(frame)
+            sign, confidence = self._recognize(hands, threshold)
+        return self._response(hands, sign, confidence)
+
+    def process_hands(self, hands_payload: Any, threshold: float) -> dict[str, Any]:
+        """Recognize from browser-side landmarks (skips JPEG + server MediaPipe)."""
+        hands = hands_from_payload(hands_payload)
+        with self._lock:
+            sign, confidence = self._recognize(hands, threshold)
+        return self._response(hands, sign, confidence)
 
     def close(self) -> None:
         self._tracker.close()
@@ -264,6 +338,14 @@ def create_app(service: RecognitionService) -> Flask:
         )
         threshold = min(max(threshold, 0.0), 1.0)
         try:
+            if request.is_json:
+                payload = request.get_json(silent=True) or {}
+                if isinstance(payload, dict) and "threshold" in payload:
+                    threshold = min(max(float(payload["threshold"]), 0.0), 1.0)
+                hands_payload = (
+                    payload.get("hands", payload) if isinstance(payload, dict) else payload
+                )
+                return jsonify(service.process_hands(hands_payload, threshold))
             return jsonify(service.process(request.get_data(), threshold))
         except ValueError as exc:
             return jsonify({"error": str(exc)}), 400

@@ -1,9 +1,10 @@
 "use strict";
 
-const CAPTURE_WIDTH = 480;
-const JPEG_QUALITY = 0.6;
+const CAPTURE_WIDTH = 320;
+const JPEG_QUALITY = 0.5;
 const STABLE_FRAMES = 6;
 const UNKNOWN = "unknown";
+const HANDS_CDN = "https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1675469240";
 const PHRASES = {
   hello: "Hello",
   yes: "Yes",
@@ -70,6 +71,11 @@ const state = {
   candidateCount: 0,
   lastCommitted: null,
   words: [],
+  hands: null,
+  useBrowserHands: false,
+  lastSign: UNKNOWN,
+  lastConfidence: 0,
+  latestHandsResults: null,
 };
 
 const captureCanvas = document.createElement("canvas");
@@ -160,10 +166,56 @@ async function listCameras(activeId) {
   return devices;
 }
 
+function loadScript(src) {
+  return new Promise((resolve, reject) => {
+    const existing = document.querySelector(`script[src="${src}"]`);
+    if (existing) {
+      resolve();
+      return;
+    }
+    const script = document.createElement("script");
+    script.src = src;
+    script.async = true;
+    script.onload = () => resolve();
+    script.onerror = () => reject(new Error(`Failed to load ${src}`));
+    document.head.appendChild(script);
+  });
+}
+
+async function ensureBrowserHands() {
+  if (state.hands) return true;
+  try {
+    await loadScript(`${HANDS_CDN}/hands.js`);
+    if (typeof Hands !== "function") return false;
+    const hands = new Hands({
+      locateFile: (file) => `${HANDS_CDN}/${file}`,
+    });
+    hands.setOptions({
+      maxNumHands: 2,
+      modelComplexity: 0,
+      minDetectionConfidence: 0.5,
+      minTrackingConfidence: 0.5,
+    });
+    hands.onResults((results) => {
+      state.latestHandsResults = results;
+    });
+    state.hands = hands;
+    return true;
+  } catch (error) {
+    console.warn("Browser hand tracking unavailable; using server JPEG path.", error);
+    state.hands = null;
+    return false;
+  }
+}
+
 async function startCamera(deviceId) {
   el.cameraError.textContent = "";
   stopCamera();
-  const video = { width: { ideal: 640 }, height: { ideal: 480 } };
+  const video = {
+    width: { ideal: 640, max: 960 },
+    height: { ideal: 360, max: 540 },
+    frameRate: { ideal: 30, max: 30 },
+  };
   if (deviceId) video.deviceId = { exact: deviceId };
 
   try {
@@ -193,6 +245,9 @@ async function startCamera(deviceId) {
   el.stopBtn.disabled = false;
   state.running = true;
   state.frameTimes = [];
+  state.lastSign = UNKNOWN;
+  state.lastConfidence = 0;
+  state.useBrowserHands = await ensureBrowserHands();
   loop();
 }
 
@@ -211,19 +266,122 @@ function stopCamera() {
 
 // ---------- Frame loop ----------
 
-function grabFrame() {
-  const scale = Math.min(1, CAPTURE_WIDTH / el.video.videoWidth);
-  captureCanvas.width = Math.round(el.video.videoWidth * scale);
-  captureCanvas.height = Math.round(el.video.videoHeight * scale);
+function sizeCaptureCanvas() {
+  const scale = Math.min(1, CAPTURE_WIDTH / Math.max(1, el.video.videoWidth));
+  const width = Math.max(1, Math.round(el.video.videoWidth * scale));
+  const height = Math.max(1, Math.round(el.video.videoHeight * scale));
+  if (captureCanvas.width !== width || captureCanvas.height !== height) {
+    captureCanvas.width = width;
+    captureCanvas.height = height;
+  }
+  return { width, height };
+}
+
+function drawMirroredVideo() {
+  const { width, height } = sizeCaptureCanvas();
+  // Mirror before MediaPipe so Left/Right labels match the training pipeline.
+  captureCtx.save();
+  captureCtx.translate(width, 0);
+  captureCtx.scale(-1, 1);
+  captureCtx.drawImage(el.video, 0, 0, width, height);
+  captureCtx.restore();
+}
+
+function grabJpegFrame() {
+  sizeCaptureCanvas();
   captureCtx.drawImage(el.video, 0, 0, captureCanvas.width, captureCanvas.height);
   return new Promise((resolve) => captureCanvas.toBlob(resolve, "image/jpeg", JPEG_QUALITY));
 }
 
-async function loop() {
+function handsFromMediaPipe(results) {
+  const landmarks = results.multiHandLandmarks || [];
+  const handedness = results.multiHandedness || [];
+  return landmarks.map((points, index) => {
+    const entry = handedness[index] || {};
+    const rank = entry.classifications?.[0]
+      || entry.classification?.[0]
+      || entry;
+    return {
+      label: rank.label || "Unknown",
+      confidence: rank.score || 0,
+      points: points.map((pt) => [pt.x, pt.y, pt.z || 0]),
+    };
+  });
+}
+
+function overlayHandsFromPayload(hands) {
+  return hands.map((hand) => ({
+    label: hand.label,
+    confidence: hand.confidence,
+    points: hand.points.map(([x, y]) => [x, y]),
+  }));
+}
+
+async function recognizeHands(hands, started) {
+  const response = await fetch(`/api/frame?threshold=${el.threshold.value}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      hands,
+      threshold: Number(el.threshold.value),
+    }),
+  });
+  const result = await response.json().catch(() => ({}));
+  if (!state.running) return null;
+  if (response.status === 404) {
+    showOffline();
+    stopCamera();
+    return null;
+  }
+  if (!response.ok) throw new Error(result.error || response.statusText);
+
+  if (result.model_loaded !== state.modelLoaded) loadStatus();
+  state.lastSign = result.sign || UNKNOWN;
+  state.lastConfidence = result.confidence || 0;
+  el.latency.textContent = `${Math.round(performance.now() - started)} ms`;
+  return result;
+}
+
+async function loopBrowserHands() {
+  while (state.running) {
+    if (!el.video.videoWidth) {
+      await new Promise((resolve) => requestAnimationFrame(resolve));
+      continue;
+    }
+    const started = performance.now();
+    try {
+      drawMirroredVideo();
+      await state.hands.send({ image: captureCanvas });
+      const hands = handsFromMediaPipe(state.latestHandsResults || {});
+      const overlay = overlayHandsFromPayload(hands);
+      drawHands(overlay);
+      await recognizeHands(hands, started);
+      if (!state.running) break;
+      showPrediction({
+        hands: overlay,
+        sign: state.lastSign,
+        confidence: state.lastConfidence,
+      });
+      tickFps();
+    } catch (error) {
+      console.error(error);
+      console.warn("Falling back to server-side JPEG tracking.");
+      state.useBrowserHands = false;
+      break;
+    }
+  }
+  if (state.running && !state.useBrowserHands) await loopJpegFallback();
+}
+
+async function loopJpegFallback() {
   while (state.running) {
     const started = performance.now();
     try {
-      const blob = await grabFrame();
+      const blob = await grabJpegFrame();
+      if (!blob) {
+        await new Promise((resolve) => requestAnimationFrame(resolve));
+        continue;
+      }
       const response = await fetch(`/api/frame?threshold=${el.threshold.value}`, {
         method: "POST",
         headers: { "Content-Type": "image/jpeg" },
@@ -250,6 +408,11 @@ async function loop() {
     }
     tickFps();
   }
+}
+
+async function loop() {
+  if (state.useBrowserHands) await loopBrowserHands();
+  else await loopJpegFallback();
 }
 
 function tickFps() {
